@@ -440,4 +440,6 @@ BuilderTrend upload.
 | Vercel page is unavailable / 500 on every route | The three `NEXT_PUBLIC_*` variables are missing. The middleware builds a Supabase client on every request and throws without them. They are inlined at build time, so **redeploy** after adding them — saving them alone changes nothing. |
 | The app loads but every API call fails | `NEXT_PUBLIC_API_URL` is wrong, or the backend's `CORS_ORIGINS` does not list the exact Vercel URL including `https://` |
 | 500s mentioning RLS | A `NEXT_PUBLIC_*` variable was given the `service_role` key, or the backend was given the `anon` key |
+| Render deploy exits 1 with `ValidationError ... Field required` | A required backend variable is unset. The startup error names every missing one and where to find it — read the line above the traceback, not the traceback |
+| Supabase shows `publishable` / `secret` keys, not `anon` / `service_role` | Newer dashboards moved the JWT keys under **Legacy API keys**. Use those; they start `eyJ`, and the frontend and backend must carry the same `anon` value |
 | `42P17: functions in index expression must be marked IMMUTABLE` | You are on a migration 001 from before 2026-09-30. Pull the latest — `created_at::DATE` on a TIMESTAMPTZ is STABLE and Postgres rejects it in an index. |

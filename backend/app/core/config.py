@@ -9,6 +9,7 @@ crash on boot, not on the first request.
 
 from typing import Optional
 
+from pydantic import ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -184,4 +185,71 @@ class Settings(BaseSettings):
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
 
-settings = Settings()
+# Where each required value comes from. A missing one is a deploy that dies
+# on boot with a pydantic traceback, which says the field name and nothing
+# about where to get it — and on a hosted deploy that is a full redeploy per
+# guess. Naming the dashboard page turns a cycle of those into one.
+_WHERE_TO_FIND = {
+    "SUPABASE_URL": (
+        "Supabase → Project Settings → API → Project URL. "
+        "Looks like https://abcdefgh.supabase.co"
+    ),
+    "SUPABASE_ANON_KEY": (
+        "Supabase → Project Settings → API → the `anon` / `public` key. "
+        "On newer dashboards it may sit under 'Legacy API keys'; it is a JWT "
+        "beginning `eyJ`. It must be the SAME value the frontend uses as "
+        "NEXT_PUBLIC_SUPABASE_ANON_KEY, or sign-in verifies against a "
+        "different project than the one holding the data."
+    ),
+    "SUPABASE_SERVICE_ROLE_KEY": (
+        "Supabase → Project Settings → API → the `service_role` / `secret` "
+        "key. This one bypasses RLS: it belongs on the backend only, and "
+        "never in a NEXT_PUBLIC_* variable."
+    ),
+}
+
+
+def _load_settings() -> Settings:
+    """Build Settings, or fail with an error a person can act on.
+
+    §12 wants fail-fast, and the crash itself is correct — a missing
+    SUPABASE_URL should stop the process on boot, not surface as a 500 on the
+    first request. What the raw pydantic traceback does not do is say which
+    variables are missing and where to get them, so this rewrites it.
+    """
+    try:
+        return Settings()
+    except ValidationError as e:
+        missing, invalid = [], []
+        for err in e.errors():
+            name = str(err["loc"][0]).upper() if err["loc"] else "?"
+            if err["type"] == "missing":
+                missing.append(name)
+            else:
+                invalid.append(f"{name}: {err['msg']}")
+
+        lines = ["", "The app cannot start: its configuration is incomplete.", ""]
+        if missing:
+            lines.append(
+                f"Missing environment variable(s): {', '.join(sorted(missing))}"
+            )
+            lines.append("")
+            for name in sorted(missing):
+                lines.append(f"  {name}")
+                lines.append(f"      {_WHERE_TO_FIND.get(name, 'See backend/.env.example')}")
+                lines.append("")
+        if invalid:
+            lines.append("Invalid value(s):")
+            lines.extend(f"  {item}" for item in invalid)
+            lines.append("")
+        lines.append(
+            "Set these in Render → your service → Environment (or in "
+            "backend/.env locally), then redeploy. Full list: "
+            "backend/.env.example, and docs/SETUP.md §1.4."
+        )
+        # `from None`: the pydantic traceback above this point is noise in a
+        # deploy log, and the whole point is that the message is readable.
+        raise RuntimeError("\n".join(lines)) from None
+
+
+settings = _load_settings()
