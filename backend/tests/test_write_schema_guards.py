@@ -9,7 +9,13 @@ level, where it is enforced, rather than trusting the handler to notice.
 import pytest
 from pydantic import ValidationError
 
-from app.schemas.invoices import FlagIn, InvoiceUpdate, VoidIn
+from app.schemas.invoices import (
+    FlagIn,
+    InvoiceUpdate,
+    MarkFiledIn,
+    MarkUploadedIn,
+    VoidIn,
+)
 from app.schemas.projects import ProjectUpdate
 
 
@@ -118,3 +124,46 @@ def test_voiding_requires_a_reason():
     assert VoidIn(reason="Entered by hand already").reason == (
         "Entered by hand already"
     )
+
+
+# ─── Phase 3 write schemas ────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["status", "approved_at", "reviewed_at", "uploaded_at", "filed_at", "amount"],
+)
+def test_mark_uploaded_forbids_everything_but_the_bill_id(field):
+    """The Chrome session reports one fact: the BuilderTrend bill id. It has
+    no business setting a stamp, a status, or an amount — §12 keeps every
+    authorising write behind a person, and `extra="forbid"` is what makes a
+    smuggled field a 422 naming the field rather than a silent write."""
+    with pytest.raises(ValidationError) as e:
+        MarkUploadedIn(bt_bill_id="BT-1", **{field: "x"})
+    assert field in str(e.value)
+
+
+def test_mark_uploaded_requires_a_bill_id():
+    with pytest.raises(ValidationError):
+        MarkUploadedIn()
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t"])
+def test_mark_uploaded_rejects_a_blank_bill_id(blank):
+    """An unidentifiable save cannot be told apart from a second bill on the
+    next call, so it must not be recordable (SOP §8.4)."""
+    with pytest.raises(ValidationError):
+        MarkUploadedIn(bt_bill_id=blank)
+
+
+def test_mark_filed_forbids_a_status():
+    with pytest.raises(ValidationError):
+        MarkFiledIn(status="filed")
+
+
+def test_mark_filed_defaults_to_the_backend_doing_the_work():
+    """No path means "file it now", which is §14's preferred route and the
+    retry button on /uploads."""
+    payload = MarkFiledIn()
+    assert payload.filed_path is None
+    assert payload.original_archived is False

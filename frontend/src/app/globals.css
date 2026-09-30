@@ -1892,3 +1892,61 @@ h1, h2, h3, h4, h5, h6 { color: var(--text-primary); }
 }
 .audit-what { color: var(--text-body); }
 .audit-who { color: var(--text-faint); margin-left: auto; flex: none; }
+
+/* ─── Uploads (prompt §10 `/uploads`) ─────────────────────────────────
+   One card per invoice, showing the BuilderTrend form values exactly as the
+   Chrome session will type them. The card is deliberately dense and
+   monospaced on the right: this screen is read as a checklist against a PDF,
+   not browsed. */
+
+.upload-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 16px 18px;
+  margin-bottom: 14px;
+  background: var(--accent-dim);
+}
+.upload-card-blocked {
+  border-color: rgba(184, 69, 58, 0.4);
+  background: rgba(184, 69, 58, 0.05);
+}
+.upload-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.upload-card-title {
+  font-family: 'EB Garamond', serif;
+  font-size: 17px;
+  color: var(--text-primary);
+}
+.upload-card-sub {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+.upload-card-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* Two columns on wide screens so a card fits on one screen without
+   scrolling, which is what makes it checkable against the PDF. */
+.upload-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 0 28px;
+}
+
+.session-prompt {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+  background: var(--accent-dim);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  margin: 10px 0;
+  color: var(--text-body);
+  overflow-wrap: anywhere;
+}

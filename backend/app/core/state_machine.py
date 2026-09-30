@@ -162,6 +162,36 @@ def require_reviewed(invoice: dict) -> Optional[str]:
     return require_balanced_costs(invoice)
 
 
+def require_human_stamps(invoice: dict) -> Optional[str]:
+    """§12: nothing reaches BuilderTrend without both human stamps.
+
+    The spec names this check explicitly — "enforce in the mark-uploaded
+    endpoint: reject if `approved_at` is null" — and it is checked here rather
+    than left to the `from_states` tuple on purpose. `status == "approved"`
+    already implies both stamps today, but this is the single line that stops
+    a bill from being recorded against BuilderTrend without a person having
+    signed it, and it should not depend on the status column being the only
+    way to reach this transition.
+
+    Deliberately NOT re-checking the cost split. By the time mark-uploaded is
+    called the bill is already saved in BuilderTrend; refusing here would
+    leave the invoice looking un-uploaded while the bill exists, which is the
+    worse of the two wrong states. An unbalanced split cannot get past
+    `approve` in the first place.
+    """
+    if not invoice.get("reviewed_at"):
+        return (
+            "This invoice carries no review stamp, so it must not be in "
+            "BuilderTrend. Do not save it; hand it back to accounting."
+        )
+    if not invoice.get("approved_at"):
+        return (
+            "This invoice carries no approval stamp, so it must not be in "
+            "BuilderTrend. Do not save it; hand it back to accounting."
+        )
+    return None
+
+
 def _join(items: list[str]) -> str:
     if len(items) == 1:
         return items[0]
@@ -199,7 +229,30 @@ REJECT = Transition(
     to_state="assigned",
 )
 
-TRANSITIONS = {t.action: t for t in (ASSIGN, MARK_REVIEWED, APPROVE, REJECT)}
+# §7.6 step 3, written by the Chrome session after a *verified* save. The
+# only state it can come from is `approved`, which is also the only state the
+# session reads — so a record it never saw cannot be marked uploaded.
+MARK_UPLOADED = Transition(
+    action="uploaded",
+    from_states=("approved",),
+    to_state="uploaded",
+    precondition=require_human_stamps,
+)
+
+# §7.7, normally written by the backend immediately after mark-uploaded. Two
+# steps have to have happened: the copy is in the vendor folder, and the
+# original is out of the intake folder. Only the copy blocks this transition
+# — see filing.file_invoice for why the archive move is non-fatal.
+MARK_FILED = Transition(
+    action="filed",
+    from_states=("uploaded",),
+    to_state="filed",
+)
+
+TRANSITIONS = {
+    t.action: t
+    for t in (ASSIGN, MARK_REVIEWED, APPROVE, REJECT, MARK_UPLOADED, MARK_FILED)
+}
 
 
 # ─── Applying a transition ────────────────────────────────────────────
@@ -238,11 +291,25 @@ def apply(
     if extra_fields:
         update.update(extra_fields)
 
-    result = _sb().table("invoices").update(update).eq("id", invoice_id).execute()
+    # The status is matched in the WHERE clause as well as checked above, so
+    # the transition is atomic. Without it, two callers who both read
+    # `approved` would both write — which for mark-uploaded means two audit
+    # entries claiming to be the first save of the same bill, and for approve
+    # means two approval stamps from two tabs. The read-then-check is what
+    # produces the helpful message; this is what makes it true.
+    result = (
+        _sb()
+        .table("invoices")
+        .update(update)
+        .eq("id", invoice_id)
+        .eq("status", current)
+        .execute()
+    )
     if not result.data:
         raise TransitionError(
-            "The update did not return a row. The invoice may have been "
-            "deleted while you were working.",
+            "This invoice moved while the change was being saved — someone "
+            "else acted on it at the same moment. Reload to see where it is "
+            "now; nothing was written.",
             status_code=409,
         )
 
@@ -272,6 +339,10 @@ def _stamps(action: str, now: str, actor: Actor) -> dict:
         return {"reviewed_at": now}
     if action == "approved":
         return {"approved_at": now}
+    if action == "uploaded":
+        return {"uploaded_at": now}
+    if action == "filed":
+        return {"filed_at": now}
     if action == "rejected":
         # The review stamp is cleared: the invoice is going back for another
         # look, and leaving it set would let it be approved again without a

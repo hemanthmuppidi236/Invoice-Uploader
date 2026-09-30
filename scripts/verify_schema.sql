@@ -1,4 +1,4 @@
--- Read-only check that migrations 001, 002, and 003 all landed.
+-- Read-only check that migrations 001 through 004 all landed.
 -- Run after applying them. Every row should say OK.
 
 SELECT 'tables'         AS what,
@@ -48,6 +48,22 @@ SELECT 'signup trigger', count(*)::text, '1',
        CASE WHEN count(*) = 1 THEN 'OK' ELSE 'RE-RUN 001' END
   FROM pg_trigger
  WHERE tgname = 'on_auth_user_created' AND NOT tgisinternal
+
+UNION ALL
+-- Migration 004. The unique index is the duplicate-bill guard: one
+-- BuilderTrend bill can only ever be recorded against one invoice.
+SELECT 'filing columns', count(*)::text, '4',
+       CASE WHEN count(*) = 4 THEN 'OK' ELSE 'RUN 004' END
+  FROM information_schema.columns
+ WHERE table_schema = 'public' AND table_name = 'invoices'
+   AND column_name IN ('filed_file_id', 'filing_error',
+                       'filing_warnings', 'original_archived')
+
+UNION ALL
+SELECT 'bt bill id unique', count(*)::text, '1',
+       CASE WHEN count(*) = 1 THEN 'OK' ELSE 'RUN 004' END
+  FROM pg_indexes
+ WHERE schemaname = 'public' AND indexname = 'idx_invoices_bt_bill_id'
 
 UNION ALL
 SELECT 'storage buckets',

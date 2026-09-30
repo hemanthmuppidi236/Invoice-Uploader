@@ -129,6 +129,10 @@ class InvoiceOut(BaseModel):
 
     bt_bill_id: Optional[str] = None
     filed_path: Optional[str] = None
+    filed_file_id: Optional[str] = None
+    original_archived: bool = False
+    filing_error: Optional[str] = None
+    filing_warnings: list[str] = []
     void_reason: Optional[str] = None
 
     source_filename: Optional[str] = None
@@ -373,3 +377,143 @@ class EmailJobResultOut(BaseModel):
     failed: int = 0
     recipients: list[dict] = []
     notes: list[str] = []
+
+
+# ─── Upload to BuilderTrend (prompt §7.6, §11) ────────────────────────
+#
+# The queue payload is deliberately verbose. The Chrome session is driving a
+# form that is slow and quirky (SOP §8), and every value it has to derive for
+# itself is a value it can derive wrongly. So the base cost code, the 4-digit
+# bill number, the end-of-next-month due date, the BuilderTrend vendor name
+# and the bill URL are all computed here and handed over ready to type.
+
+
+class UploadQueueCost(BaseModel):
+    """One Costs row on the BuilderTrend bill form.
+
+    SOP §4: "Costs row → Title: leave blank", "Unit cost: invoice total
+    (Qty = 1)". So `amount` is the unit cost and there is no quantity field —
+    a split invoice is several rows, never one row with a quantity.
+    """
+
+    cost_code: str
+    base_code: Optional[str] = None
+    name: Optional[str] = None
+    amount: Decimal
+    note: Optional[str] = None
+
+
+class UploadQueueItem(BaseModel):
+    invoice_id: str
+
+    # Where the bill goes. SOP §8.5: job context drifts, so the session opens
+    # bills by URL and then confirms the Job field on the form.
+    bt_job_id: Optional[str] = None
+    bill_url: Optional[str] = None
+    project_no: Optional[str] = None
+    project_name: Optional[str] = None
+
+    # The form fields, in SOP §4 order.
+    bill_title: Optional[str] = None
+    bill_no: Optional[str] = None
+    pay_to: Optional[str] = None
+    invoice_no: Optional[str] = None
+    invoice_date: Optional[date] = None
+    due_date: Optional[date] = None
+    amount: Optional[Decimal] = None
+    is_credit: bool = False
+    costs: list[UploadQueueCost] = []
+
+    # The PDF goes in Custom fields → Invoice, not Attachments (SOP §4).
+    pdf_url: Optional[str] = None
+    pdf_expires_in: int = 3600
+
+    # Per-project and per-vendor gotchas the session should read first.
+    quirks: dict = {}
+    project_notes: Optional[str] = None
+    vendor_notes: Optional[str] = None
+
+    age_days: Optional[int] = None
+
+    # `warnings` means proceed with care. `blockers` means do not save this
+    # one at all — flag it and move on. Kept as two lists rather than one
+    # severity field so the session cannot treat a blocker as advisory.
+    warnings: list[str] = []
+    blockers: list[str] = []
+
+
+class UploadQueueOut(BaseModel):
+    generated_at: datetime
+    count: int = 0
+    queue: list[UploadQueueItem] = []
+    blocked: list[UploadQueueItem] = []
+
+    # Context for the /uploads screen and for the session's closing summary.
+    awaiting_filing: list[InvoiceOut] = []
+    recently_uploaded: list[InvoiceOut] = []
+
+    # §14 chose backend filing. Surfaced so the Chrome session does not have
+    # to assume: false means it should file and call mark-filed itself.
+    filing_by_backend: bool = True
+    notes: list[str] = []
+
+
+class MarkUploadedIn(BaseModel):
+    """§7.6 step 3, called only after a *verified* save (SOP §4.6).
+
+    `bt_bill_id` is required and is the whole idempotency story. SOP §8.4:
+    "Never click Save twice without checking whether the first one fired —
+    that's how duplicate bills get created." Repeating the call with the same
+    id is a quiet success; repeating it with a different id is a 409, because
+    that means two bills exist for one invoice.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    bt_bill_id: str
+    note: Optional[str] = None
+
+    @field_validator("bt_bill_id")
+    @classmethod
+    def _bill_id_required(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not v:
+            raise ValueError(
+                "The BuilderTrend bill id is required. It is the only way to "
+                "tell a repeated call apart from a second bill, so a save "
+                "that cannot be identified must not be recorded."
+            )
+        return v
+
+
+class MarkFiledIn(BaseModel):
+    """§7.7, and the §14 escape hatch.
+
+    Leave `filed_path` unset and the backend does the filing now — that is
+    the normal path and the retry button on /uploads. Set it to record a copy
+    that was filed outside the backend, which is what §14 allows "if Phase 3
+    shows Drive permissions make that awkward".
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    filed_path: Optional[str] = None
+    original_archived: bool = False
+
+
+class FilingOut(BaseModel):
+    filed: bool = False
+    filed_path: Optional[str] = None
+    original_archived: bool = False
+    error: Optional[str] = None
+    needs_folder: bool = False
+    warnings: list[str] = []
+
+
+class MarkUploadedOut(BaseModel):
+    invoice: InvoiceDetail
+    filing: FilingOut = FilingOut()
+    # True when this call found the invoice already recorded with the same
+    # bill id. The session uses it to tell "I already did this" apart from
+    # "I just did this", so a retried batch does not double-count.
+    already_recorded: bool = False

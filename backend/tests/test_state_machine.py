@@ -15,7 +15,7 @@ from app.core import state_machine
 from app.core.auth import Actor, CurrentUser
 from app.core.state_machine import TransitionError
 
-from tests.test_intake_idempotency import FakeClient, FakeTable  # reuse the fake
+from tests.fakes import FakeClient, FakeTable
 
 
 REVIEWER = "u-pe"
@@ -422,3 +422,58 @@ def test_the_chrome_session_may_never_approve():
         state_machine.require_assigned_approver(ready_invoice(), agent())
     assert e.value.status_code == 403
     assert "human approval stamp" in str(e.value)
+
+
+# ─── Atomicity ────────────────────────────────────────────────────────
+
+
+def test_a_stale_read_cannot_write_over_a_concurrent_transition(monkeypatch):
+    """Two callers who both read `approved` must not both write.
+
+    Exercised the way it actually happens: the caller holds an invoice dict
+    read a moment ago, and the row has moved since. The from_states check
+    passes — it is looking at the stale copy — so the only thing standing
+    between the two writers is the status being matched in the UPDATE's own
+    filter. For approve, losing that is two approval stamps from two tabs;
+    for mark-uploaded it is two audit entries each claiming to be the first
+    save of the same bill.
+    """
+    from app.core import audit, state_machine as sm
+    from tests.fakes import FakeClient, FakeTable
+
+    client = FakeClient()
+    client.tables["invoices"] = FakeTable(
+        "invoices",
+        [
+            {
+                "id": "inv-1",
+                # Somebody else already moved it.
+                "status": "uploaded",
+                "reviewed_at": "2026-09-20T10:00:00+00:00",
+                "approved_at": "2026-09-21T10:00:00+00:00",
+            }
+        ],
+    )
+    monkeypatch.setattr(sm, "_sb", lambda: client)
+    monkeypatch.setattr(audit, "get_service_client", lambda: client)
+
+    stale = {
+        "id": "inv-1",
+        "status": "approved",
+        "reviewed_at": "2026-09-20T10:00:00+00:00",
+        "approved_at": "2026-09-21T10:00:00+00:00",
+    }
+
+    with pytest.raises(sm.TransitionError) as e:
+        sm.apply(
+            invoice=stale,
+            transition=sm.MARK_UPLOADED,
+            actor=Actor(is_agent=True),
+            extra_fields={"bt_bill_id": "BT-2"},
+        )
+    assert e.value.status_code == 409
+    assert "moved while" in str(e.value)
+    # Nothing was written: the other caller's bill id is not overwritten.
+    assert client.tables["invoices"].rows[0].get("bt_bill_id") is None
+    # And no audit row claims a second transition happened.
+    assert not client.tables.get("audit_log", FakeTable("audit_log")).rows

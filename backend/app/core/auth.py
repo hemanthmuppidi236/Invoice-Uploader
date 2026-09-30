@@ -245,6 +245,28 @@ def require_agent_or_role(*allowed_roles: str):
     return _check
 
 
+def agent_or_user():
+    """Dependency for reads the Chrome session makes that are open to anyone.
+
+    `require_agent_or_role` needs a role list; this is the no-role variant,
+    for the two reads prompt §10 says are not gated beyond authentication —
+    the invoice PDF being the one the session actually needs, because a batch
+    can outlive a signed URL and it has to be able to ask for a fresh one.
+    """
+
+    def _check(
+        x_agent_key: Optional[str] = Header(default=None, alias="X-Agent-Key"),
+        credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    ) -> Actor:
+        if _agent_key_matches(x_agent_key):
+            return Actor(is_agent=True)
+        if x_agent_key:
+            log.warning("Rejected X-Agent-Key: value did not match")
+        return Actor(user=get_current_user(credentials))
+
+    return _check
+
+
 def require_agent_only():
     """Dependency for endpoints ONLY the Chrome session may call."""
 

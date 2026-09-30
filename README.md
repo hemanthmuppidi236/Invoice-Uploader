@@ -58,6 +58,9 @@ suggestion, flagged triage.
 **Phase 2** — assignment, review, approval, the audit trail, and both daily
 emails.
 
+**Phase 3** — the upload queue the Chrome session reads, the `mark-uploaded`
+guard, and the Drive filing that follows it.
+
 Built and working:
 
 - Google OAuth login, domain-restricted, with the backend as the authority on roles
@@ -72,15 +75,13 @@ Built and working:
 - Invoice list with the role-aware "Your court" queue, stat cards, and filters
 - Invoice detail: PDF beside the form, the AI rationale with one-click alternative chips, a cost split that auto-saves, the workflow panel, and the audit trail
 - `/admin` for cost codes, vendors, users and roles, and the distribution list
+- The upload queue: the BuilderTrend field values computed server-side, with blockers separated from warnings, and the §12 guard plus double-save protection on `mark-uploaded`
+- Drive filing: the vendor folder's own naming convention inferred from what is already in it, the original moved to `Uploaded/`, and never a delete or a created folder
+- `/uploads`: the approved queue as a per-invoice form preview, the retry for a failed filing, and the last sessions' results
 
 Not built yet, by design:
 
-- **Phase 3**: the Chrome uploader integration, `mark-uploaded`, `mark-filed`, and Drive filing
 - **Phase 4**: White Cap combined-file splitting, duplicate detection hardening, a metrics page
-
-`/uploads` renders the shell with a placeholder naming the phase that builds
-it. The agent-authenticated endpoints are absent rather than stubbed: a route
-that exists but does not enforce the §12 guardrails is worse than no route.
 
 ## Getting started
 
@@ -88,12 +89,14 @@ Setup, and what still has to be pasted in from the kickoff document, is in
 **[docs/PHASE_0.md](docs/PHASE_0.md)**. Drive credentials and how the cost
 code gets chosen are in **[docs/PHASE_1.md](docs/PHASE_1.md)**. The workflow,
 Gmail setup, and the cron schedules are in
-**[docs/PHASE_2.md](docs/PHASE_2.md)**.
+**[docs/PHASE_2.md](docs/PHASE_2.md)**. The upload and filing half is in
+**[docs/PHASE_3.md](docs/PHASE_3.md)**, and the contract the Chrome session
+itself works from is **[docs/AGENT_API.md](docs/AGENT_API.md)**.
 
 The short version:
 
 ```bash
-# 1. Create a Supabase project, then run migrations/001, 002, 003 in order
+# 1. Create a Supabase project, then run migrations/001 through 004 in order
 #    in the SQL editor. Create the `invoices` and `mix-designs` Storage
 #    buckets and keep both private.
 

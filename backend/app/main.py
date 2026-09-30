@@ -70,6 +70,13 @@ def health():
             "drive_auth": settings.drive_auth_mode,
             "email": settings.email_enabled,
             "agent_auth": settings.agent_auth_enabled,
+            # Reported separately from "drive": intake needs only the intake
+            # folder, but §7.7 filing also needs BT Invoices. Without this
+            # line a deploy with Drive credentials and no BT Invoices id
+            # looks healthy right up to the first successful upload.
+            "filing": bool(
+                settings.drive_enabled and settings.drive_folder_bt_invoices
+            ),
         },
         "jobs_paused": settings.jobs_paused,
     }

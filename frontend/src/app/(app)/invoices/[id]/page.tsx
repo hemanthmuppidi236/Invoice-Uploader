@@ -876,11 +876,41 @@ function StatusBanner({ invoice }: { invoice: InvoiceDetail }) {
     body =
       "Approved and ready for the next Chrome upload session. Nothing else is needed here.";
   } else if (invoice.status === "uploaded") {
-    body = `Entered in BuilderTrend${
-      invoice.bt_bill_id ? ` as bill ${invoice.bt_bill_id}` : ""
-    }. Filing still pending.`;
+    // `uploaded` and not `filed` means the bill is real and the Drive half is
+    // not done. Saying which half is outstanding matters: the recovery for a
+    // filing failure is a Drive folder, never a second BuilderTrend save.
+    body = (
+      <>
+        Entered in BuilderTrend
+        {invoice.bt_bill_id ? ` as bill ${invoice.bt_bill_id}` : ""}.{" "}
+        {invoice.filing_error ? (
+          <>
+            The Drive copy did not file: {invoice.filing_error} The bill itself
+            is fine — retry the filing from{" "}
+            <Link href="/uploads" className="dash-open-link">
+              Uploads
+            </Link>
+            .
+          </>
+        ) : (
+          "Filing still pending."
+        )}
+      </>
+    );
   } else {
-    body = `Filed${invoice.filed_path ? ` to ${invoice.filed_path}` : ""}.`;
+    body = (
+      <>
+        Filed{invoice.filed_path ? ` to ${invoice.filed_path}` : ""}.
+        {!invoice.original_archived && (
+          <> The Drive original is still in the intake folder.</>
+        )}
+        {invoice.filing_warnings.map((w) => (
+          <div style={{ marginTop: 6 }} key={w}>
+            {w}
+          </div>
+        ))}
+      </>
+    );
   }
 
   return (

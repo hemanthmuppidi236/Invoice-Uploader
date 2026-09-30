@@ -82,6 +82,14 @@ class Settings(BaseSettings):
     # ─── Frontend URL, for deep links in emails ───────────────────────
     app_url: str = "http://localhost:3000"
 
+    # ─── BuilderTrend ─────────────────────────────────────────────────
+    # SOP §8.5: "Job context drifts. Open new bills via
+    # buildertrend.net/app/Bills/Bill/0/{jobId}". The upload queue builds that
+    # URL per invoice so the Chrome session never navigates by clicking
+    # through jobs. Configurable only so a tenant-specific host does not need
+    # a deploy.
+    buildertrend_base_url: str = "https://buildertrend.net"
+
     # ─── Auth ─────────────────────────────────────────────────────────
     allowed_email_domain: Optional[str] = "ferrocretebuilders.com"
 

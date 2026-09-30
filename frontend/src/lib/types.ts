@@ -402,6 +402,12 @@ export interface Invoice {
 
   bt_bill_id: string | null;
   filed_path: string | null;
+  filed_file_id: string | null;
+  /** The Drive original has been moved to `Uploaded/` (prompt §7.7). */
+  original_archived: boolean;
+  /** Set when the bill saved but the Drive filing did not. Retryable. */
+  filing_error: string | null;
+  filing_warnings: string[];
   void_reason: string | null;
 
   source_filename: string | null;
@@ -648,3 +654,98 @@ function joinWords(items: string[]): string {
   if (items.length === 1) return items[0];
   return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
 }
+
+// ─── Upload to BuilderTrend (Phase 3, prompt §7.6) ────────────────────
+
+/**
+ * One Costs row on the BuilderTrend bill form.
+ *
+ * SOP §4 is specific: the row's Title is left blank, Qty is 1, and the Unit
+ * cost carries the money. So there is no quantity here — a split invoice is
+ * several rows, never one row with a quantity.
+ */
+export interface UploadQueueCost {
+  cost_code: string;
+  base_code: string | null;
+  name: string | null;
+  amount: Money;
+  note: string | null;
+}
+
+/**
+ * Everything the Chrome session types, computed server-side.
+ *
+ * This screen renders it verbatim rather than re-deriving anything, so what
+ * Linda checks before starting a session is exactly what the session will
+ * enter. A preview that recomputed the values could agree with itself and
+ * still disagree with the API.
+ */
+export interface UploadQueueItem {
+  invoice_id: UUID;
+
+  bt_job_id: string | null;
+  /** `buildertrend.net/app/Bills/Bill/0/{jobId}` — SOP §8.5. */
+  bill_url: string | null;
+  project_no: string | null;
+  project_name: string | null;
+
+  bill_title: string | null;
+  bill_no: string | null;
+  pay_to: string | null;
+  invoice_no: string | null;
+  invoice_date: ISODate | null;
+  due_date: ISODate | null;
+  amount: Money | null;
+  is_credit: boolean;
+  costs: UploadQueueCost[];
+
+  pdf_url: string | null;
+  pdf_expires_in: number;
+
+  quirks: Record<string, unknown>;
+  project_notes: string | null;
+  vendor_notes: string | null;
+  age_days: number | null;
+
+  /** Proceed, but read this first. */
+  warnings: string[];
+  /** Do not enter this one. Flag it and move on. */
+  blockers: string[];
+}
+
+export interface UploadQueue {
+  generated_at: ISODateTime;
+  count: number;
+  queue: UploadQueueItem[];
+  blocked: UploadQueueItem[];
+  awaiting_filing: Invoice[];
+  recently_uploaded: Invoice[];
+  filing_by_backend: boolean;
+  notes: string[];
+}
+
+export interface FilingResult {
+  filed: boolean;
+  filed_path: string | null;
+  original_archived: boolean;
+  error: string | null;
+  needs_folder: boolean;
+  warnings: string[];
+}
+
+export interface MarkUploadedResult {
+  invoice: InvoiceDetail;
+  filing: FilingResult;
+  already_recorded: boolean;
+}
+
+/**
+ * The prompt Linda pastes into the Chrome project to start a session.
+ *
+ * Kept here rather than in the page body because it is the one piece of text
+ * that has to match the saved BuilderTrend process doc word for word — §7.6
+ * quotes it, and a paraphrase would send the session looking for a process
+ * it cannot find.
+ */
+export const CHROME_SESSION_PROMPT =
+  "Using the saved BuilderTrend invoice upload process, upload the approved invoices from the review app.";

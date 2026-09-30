@@ -299,16 +299,27 @@ def move(file_id: str, *, to_folder_id: str) -> dict:
     service = get_service()
     current = (
         service.files()
-        .get(fileId=file_id, fields="parents", supportsAllDrives=True)
+        .get(fileId=file_id, fields="id, name, parents", supportsAllDrives=True)
         .execute()
     )
-    previous = ",".join(current.get("parents", []))
+    parents = current.get("parents", [])
+
+    # Already there. This is not a hypothetical: a combined White Cap PDF is
+    # one Drive file behind several invoice rows (§7.1 keys on
+    # (source_file_id, source_page)), so the second page's filing asks to
+    # archive a file the first page already archived. Without this the call
+    # would try to remove the destination from its own parents.
+    if parents == [to_folder_id]:
+        log.debug("file %s is already in %s; nothing to move", file_id, to_folder_id)
+        return current
+
+    previous = ",".join(p for p in parents if p != to_folder_id)
     return (
         service.files()
         .update(
             fileId=file_id,
             addParents=to_folder_id,
-            removeParents=previous,
+            removeParents=previous or None,
             fields="id, name, parents",
             supportsAllDrives=True,
         )

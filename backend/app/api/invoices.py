@@ -19,18 +19,36 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status as http
 
-from ..core import audit, intake, state_machine, storage
-from ..core.auth import Actor, CurrentUser, as_actor, get_current_user, require_role
+from ..core import audit, filing, intake, state_machine, storage
+from ..core.auth import (
+    Actor,
+    CurrentUser,
+    agent_or_user,
+    as_actor,
+    get_current_user,
+    require_agent_or_role,
+    require_role,
+)
 from ..core.config import settings
-from ..core.invoice_rules import costs_balance, bill_no_for, due_date_for, to_money
+from ..core.invoice_rules import (
+    bill_no_for,
+    costs_balance,
+    due_date_for,
+    is_do_not_select,
+    to_money,
+)
 from ..core.supabase_client import get_service_client
 from ..schemas.invoices import (
     AssignIn,
     AuditEntryOut,
     BulkAssignIn,
     BulkAssignResult,
+    FilingOut,
     FlagIn,
+    MarkFiledIn,
     MarkReviewedIn,
+    MarkUploadedIn,
+    MarkUploadedOut,
     InvoiceCostOut,
     InvoiceDashboard,
     InvoiceDetail,
@@ -43,6 +61,9 @@ from ..schemas.invoices import (
     RejectIn,
     SignedUrlOut,
     SuggestionOut,
+    UploadQueueCost,
+    UploadQueueItem,
+    UploadQueueOut,
     VoidIn,
 )
 
@@ -374,11 +395,445 @@ def _decorate(rows: list[dict], lookups: dict) -> list[InvoiceOut]:
     ]
 
 
+# ─── Upload queue (prompt §7.6 step 1, §11) ───────────────────────────
+#
+# Registered BEFORE `GET /{invoice_id}`. FastAPI matches routes in
+# declaration order, so a later registration would resolve this path as
+# `invoice_id="upload-queue"` and 404 on a lookup for an invoice that does
+# not exist.
+
+# SOP §4.2: "Check for duplicates if the invoice is more than a few weeks
+# old." Three weeks is the line, because that is when a bill is old enough to
+# plausibly have been entered by hand already.
+DUPLICATE_CHECK_AGE_DAYS = 21
+
+# Signed PDF URLs in the queue outlive a typical batch. SOP §8.1 budgets a
+# draft-save-reload cycle per bill, so twenty invoices can run past an hour;
+# a URL that expires mid-batch looks to the session like a missing PDF. The
+# session can always re-fetch one invoice's URL from /pdf-url.
+QUEUE_PDF_URL_TTL = 4 * 3600
+
+
+@router.get("/upload-queue", response_model=UploadQueueOut)
+def upload_queue(
+    limit: int = Query(default=100, le=500),
+    actor: Actor = Depends(require_agent_or_role("admin", "accountant")),
+):
+    """Everything the Chrome session needs to type, computed server-side.
+
+    §7.6 step 1 describes this as `GET /invoices?status=approved`. It is a
+    separate endpoint because the list payload is shaped for a table and the
+    session needs something different: the BuilderTrend field values rather
+    than the app's own record. Every value the session would otherwise derive
+    for itself — the base code for the Title, the last four digits for the
+    Bill #, the end-of-next-month due date, the BuilderTrend vendor name, the
+    bill URL — is derived here instead, where it is tested.
+
+    Two lists come back. `queue` is safe to work. `blocked` is approved but
+    missing something BuilderTrend needs, and each item says what; the
+    session must flag those rather than improvise. They are separate lists so
+    a blocker cannot be read as advisory.
+    """
+    rows = (
+        _sb()
+        .table("invoices")
+        .select("*")
+        .eq("status", "approved")
+        .order("approved_at")
+        .limit(limit)
+        .execute()
+        .data
+        or []
+    )
+
+    # Oldest approved first, same reasoning as the intake backlog: with a cap
+    # in place the order decides who waits, and the longest-approved invoice
+    # is the most overdue vendor.
+    lookups = _lookups()
+    ids = [r["id"] for r in rows]
+    costs = _costs_by_invoice(ids)
+
+    projects = _full_projects([r.get("project_id") for r in rows])
+    vendors = _full_vendors([r.get("vendor_id") for r in rows])
+    code_rows = _full_cost_codes()
+
+    queue: list[UploadQueueItem] = []
+    blocked: list[UploadQueueItem] = []
+    for row in rows:
+        item = _to_queue_item(
+            row,
+            project=projects.get(row.get("project_id") or ""),
+            vendor=vendors.get(row.get("vendor_id") or ""),
+            cost_rows=costs.get(row["id"], []),
+            codes=code_rows,
+        )
+        (blocked if item.blockers else queue).append(item)
+
+    awaiting = (
+        _sb()
+        .table("invoices")
+        .select("*")
+        .eq("status", "uploaded")
+        .order("uploaded_at")
+        .limit(200)
+        .execute()
+        .data
+        or []
+    )
+    recent = (
+        _sb()
+        .table("invoices")
+        .select("*")
+        .in_("status", ["uploaded", "filed"])
+        .order("uploaded_at", desc=True)
+        .limit(50)
+        .execute()
+        .data
+        or []
+    )
+
+    notes: list[str] = []
+    if blocked:
+        notes.append(
+            f"{len(blocked)} approved invoice(s) are missing something "
+            "BuilderTrend needs. Flag them; do not improvise a value."
+        )
+    if awaiting:
+        notes.append(
+            f"{len(awaiting)} invoice(s) are in BuilderTrend but not yet "
+            "filed to Drive. Retry filing from /uploads."
+        )
+    if not settings.drive_enabled or not settings.drive_folder_bt_invoices:
+        notes.append(
+            "Drive filing is not configured, so mark-uploaded will not file "
+            "the copy. The bills still save; the filing step has to be done "
+            "by hand until Drive is set up."
+        )
+
+    return UploadQueueOut(
+        generated_at=datetime.now(timezone.utc),
+        count=len(queue),
+        queue=queue,
+        blocked=blocked,
+        awaiting_filing=_decorate(awaiting, lookups),
+        recently_uploaded=_decorate(recent, lookups),
+        filing_by_backend=True,
+        notes=notes,
+    )
+
+
+def _full_projects(project_ids: list[Optional[str]]) -> dict[str, dict]:
+    """Projects with the columns only the upload path needs."""
+    wanted = [p for p in dict.fromkeys(project_ids) if p]
+    if not wanted:
+        return {}
+    rows = (
+        _sb()
+        .table("projects")
+        .select(
+            "id,project_no,name,bt_job_id,drive_folder_name,quirks,notes,status"
+        )
+        .in_("id", wanted)
+        .execute()
+        .data
+        or []
+    )
+    return {r["id"]: r for r in rows}
+
+
+def _full_vendors(vendor_ids: list[Optional[str]]) -> dict[str, dict]:
+    wanted = [v for v in dict.fromkeys(vendor_ids) if v]
+    if not wanted:
+        return {}
+    rows = (
+        _sb()
+        .table("vendors")
+        .select("id,invoice_name,bt_name,drive_folder_name,notes,active")
+        .in_("id", wanted)
+        .execute()
+        .data
+        or []
+    )
+    return {r["id"]: r for r in rows}
+
+
+def _full_cost_codes() -> dict[str, dict]:
+    rows = (
+        _sb()
+        .table("cost_codes")
+        .select("id,code,base_code,description,active")
+        .execute()
+        .data
+        or []
+    )
+    return {r["id"]: r for r in rows}
+
+
+def _bill_title(cost_items: list[UploadQueueCost]) -> tuple[Optional[str], list[str]]:
+    """The one base code that goes in the Bill Title (SOP §4).
+
+    BuilderTrend's Title field takes a single base code, but an invoice can
+    legitimately split across codes with different bases — 3002 for walls and
+    3008 for a slab on the same ready-mix bill. The form cannot express that,
+    so the largest share wins and the caller warns about the rest. Silently
+    picking the first row would put a plausible wrong code on the bill, which
+    nobody would notice.
+
+    Ties break on the lower code, so the answer does not depend on row order.
+    """
+    totals: dict[str, Decimal] = {}
+    for c in cost_items:
+        if not c.base_code:
+            continue
+        totals[c.base_code] = totals.get(c.base_code, Decimal("0")) + abs(c.amount)
+    if not totals:
+        return None, []
+    ranked = sorted(totals.items(), key=lambda kv: (-kv[1], kv[0]))
+    return ranked[0][0], [code for code, _ in ranked]
+
+
+def _to_queue_item(
+    row: dict,
+    *,
+    project: Optional[dict],
+    vendor: Optional[dict],
+    cost_rows: list[dict],
+    codes: dict[str, dict],
+) -> UploadQueueItem:
+    warnings: list[str] = []
+    blockers: list[str] = []
+
+    cost_items: list[UploadQueueCost] = []
+    for c in cost_rows:
+        code_row = codes.get(c.get("cost_code_id") or "") or {}
+        if not code_row:
+            blockers.append(
+                "A cost row points at a cost code that no longer exists. "
+                "Accounting has to re-code this invoice."
+            )
+            continue
+        if not code_row.get("active"):
+            warnings.append(
+                f"Cost code {code_row.get('code')} is marked inactive in the "
+                "app. Confirm it is still selectable in BuilderTrend."
+            )
+        cost_items.append(
+            UploadQueueCost(
+                cost_code=code_row.get("code") or "",
+                base_code=code_row.get("base_code"),
+                name=code_row.get("description"),
+                amount=to_money(c.get("amount")) or Decimal("0.00"),
+            )
+        )
+
+    bill_title, base_codes = _bill_title(cost_items)
+    if len(base_codes) > 1:
+        warnings.append(
+            "The cost split crosses base codes "
+            + _join_codes(base_codes)
+            + f". BuilderTrend's Bill Title takes one, so it is set to "
+            f"{bill_title} (the largest share). The Costs rows still carry "
+            "every sub-code. Check with Linda if the Title should differ."
+        )
+
+    # ── Blockers: anything BuilderTrend cannot be given a value for ──
+    if not project:
+        blockers.append("No project on this invoice, so there is no job to bill to.")
+    elif project.get("status") == "active":
+        # §4.1: a current job is handled by a different workflow entirely.
+        blockers.append(
+            f"{project.get('name')} is a current job, which this workflow "
+            "does not cover (§4.1). It should never have reached approved."
+        )
+    if not vendor:
+        blockers.append("No vendor on this invoice, so Pay To cannot be filled.")
+    else:
+        if not vendor.get("bt_name"):
+            blockers.append(
+                "This vendor has no BuilderTrend name recorded. Add the "
+                "mapping in /admin (SOP §6)."
+            )
+        elif is_do_not_select(vendor.get("bt_name")):
+            # SOP §6: "Never pick a vendor labeled ** DO NOT SELECT **."
+            blockers.append(
+                f"The recorded BuilderTrend vendor is {vendor['bt_name']!r}, "
+                "which BuilderTrend marks DO NOT SELECT. Fix the mapping "
+                "before uploading."
+            )
+        if vendor.get("active") is False:
+            warnings.append(
+                f"{vendor.get('invoice_name')} is marked inactive in the app."
+            )
+
+    if not cost_items:
+        blockers.append("No cost rows, so the Costs grid cannot be filled.")
+    if not bill_title:
+        blockers.append(
+            "None of the cost codes has a base code, so the Bill Title has "
+            "no value (SOP §4)."
+        )
+
+    amount = to_money(row.get("amount"))
+    if amount is None:
+        blockers.append("No invoice total.")
+    else:
+        split_total = sum((c.amount for c in cost_items), Decimal("0.00"))
+        if cost_items and split_total != amount:
+            blockers.append(
+                f"The cost rows sum to ${split_total:,.2f} but the invoice "
+                f"total is ${amount:,.2f}. Do not enter this."
+            )
+        if amount == 0:
+            warnings.append(
+                "The invoice total is $0.00. BuilderTrend will take it, but "
+                "confirm it is not a misread before saving."
+            )
+
+    invoice_date = row.get("invoice_date")
+    if not invoice_date:
+        blockers.append("No invoice date.")
+    bill_no = row.get("bill_no") or bill_no_for(row.get("invoice_no"))
+    if not bill_no:
+        blockers.append(
+            "No Bill # could be derived — the invoice number has no digits "
+            "in it (SOP §4)."
+        )
+
+    due_date = row.get("due_date")
+    if not due_date and invoice_date:
+        # Derived rather than left blank: SOP §4 is explicit that vendor terms
+        # are ignored, so there is nothing to look up on the invoice.
+        parsed = _as_date(invoice_date)
+        due_date = due_date_for(parsed) if parsed else None
+
+    # ── Warnings: proceed, but read this first ──
+    bill_url = None
+    if project and project.get("bt_job_id"):
+        bill_url = (
+            f"{settings.buildertrend_base_url.rstrip('/')}"
+            f"/app/Bills/Bill/0/{project['bt_job_id']}"
+        )
+    elif project:
+        warnings.append(
+            "No BuilderTrend job id is recorded for this project, so there "
+            "is no direct bill URL. Navigate to the job by name and confirm "
+            "the Job field before typing anything (SOP §8.5)."
+        )
+
+    age = _age_days(row)
+    if age is not None and age > DUPLICATE_CHECK_AGE_DAYS:
+        warnings.append(
+            f"This invoice is {age} days old. Before saving, check the job's "
+            "Bills → All Bills tab filtered by Pay To for a bill at this "
+            "amount and date (SOP §4.2)."
+        )
+
+    if row.get("is_credit") or (amount is not None and amount < 0):
+        warnings.append(
+            "Credit memo. Enter it as a normal bill on the same job with the "
+            "negative amount (SOP §5)."
+        )
+
+    if project and not project.get("drive_folder_name"):
+        warnings.append(
+            "No Drive folder name is recorded for this project, so filing "
+            "will stop and ask after the save. The BuilderTrend part is "
+            "unaffected."
+        )
+    if vendor and not (vendor.get("drive_folder_name") or vendor.get("invoice_name")):
+        warnings.append(
+            "No Drive folder name is recorded for this vendor, so filing "
+            "will stop and ask after the save."
+        )
+
+    if not row.get("pdf_storage_path"):
+        blockers.append(
+            "No PDF is stored for this invoice, and SOP §4 requires it in "
+            "Custom fields → Invoice."
+        )
+        pdf_url = None
+    else:
+        try:
+            pdf_url = storage.signed_url(
+                storage.INVOICES,
+                row["pdf_storage_path"],
+                expires_in=QUEUE_PDF_URL_TTL,
+            )
+        except Exception as e:  # noqa: BLE001
+            # One unreachable object must not take the whole queue down with
+            # it. The invoice is blocked, everything else still gets worked.
+            log.exception("signed URL failed for invoice %s", row["id"])
+            pdf_url = None
+            blockers.append(
+                f"The stored PDF could not be prepared for download ({e}). "
+                "SOP §4 requires it attached, so hold this one."
+            )
+
+    quirks = (project or {}).get("quirks") or {}
+    if quirks:
+        warnings.append(
+            "This project has recorded quirks. Read them before starting."
+        )
+
+    return UploadQueueItem(
+        invoice_id=row["id"],
+        bt_job_id=(project or {}).get("bt_job_id"),
+        bill_url=bill_url,
+        project_no=(project or {}).get("project_no"),
+        project_name=(project or {}).get("name"),
+        bill_title=bill_title,
+        bill_no=bill_no,
+        pay_to=(vendor or {}).get("bt_name"),
+        invoice_no=row.get("invoice_no"),
+        invoice_date=_as_date(invoice_date),
+        due_date=_as_date(due_date),
+        amount=amount,
+        is_credit=bool(row.get("is_credit")),
+        costs=cost_items,
+        pdf_url=pdf_url,
+        pdf_expires_in=QUEUE_PDF_URL_TTL,
+        quirks=quirks,
+        project_notes=(project or {}).get("notes"),
+        vendor_notes=(vendor or {}).get("notes"),
+        age_days=age,
+        # Deduplicated: a per-cost-row check can add the same sentence twice
+        # on a split invoice, and a warning repeated three times reads like
+        # three problems.
+        warnings=list(dict.fromkeys(warnings)),
+        blockers=list(dict.fromkeys(blockers)),
+    )
+
+
+def _as_date(value) -> Optional[date]:
+    if value is None or isinstance(value, date):
+        return value if not isinstance(value, datetime) else value.date()
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
+
+
+def _join_codes(codes: list[str]) -> str:
+    if len(codes) == 1:
+        return codes[0]
+    return ", ".join(codes[:-1]) + " and " + codes[-1]
+
+
 # ─── Detail ───────────────────────────────────────────────────────────
 
 
 @router.get("/{invoice_id}", response_model=InvoiceDetail)
 def get_invoice(invoice_id: str, user: CurrentUser = Depends(get_current_user)):
+    return _detail(invoice_id)
+
+
+def _detail(invoice_id: str) -> InvoiceDetail:
+    """The full detail payload, with no auth dependency of its own.
+
+    Every write endpoint returns it, and the Chrome session's endpoints have
+    an Actor rather than a CurrentUser — so the assembly lives here and the
+    route above is only the auth wrapper.
+    """
     row = _fetch_invoice(invoice_id)
     lookups = _lookups()
 
@@ -476,11 +931,14 @@ def get_invoice(invoice_id: str, user: CurrentUser = Depends(get_current_user)):
 
 
 @router.get("/{invoice_id}/pdf-url", response_model=SignedUrlOut)
-def get_pdf_url(invoice_id: str, user: CurrentUser = Depends(get_current_user)):
+def get_pdf_url(invoice_id: str, actor: Actor = Depends(agent_or_user())):
     """Signed URL for the invoice PDF.
 
     Not role-gated beyond authentication: prompt §10 says downloads are not
-    gated, same as the pay app.
+    gated, same as the pay app. The Chrome session is allowed too — a batch
+    can outlive the URLs handed out with the upload queue (SOP §8.1 budgets a
+    save-reload cycle per bill), and it has to be able to ask for a fresh one
+    rather than skip the PDF.
     """
     row = _fetch_invoice(invoice_id)
     if not row.get("pdf_storage_path"):
@@ -582,7 +1040,7 @@ def update_invoice(
             },
         )
 
-    return get_invoice(invoice_id, user=user)
+    return _detail(invoice_id)
 
 
 def _replace_cost_rows(invoice_id: str, rows: list) -> None:
@@ -635,14 +1093,35 @@ def _require_row(table: str, row_id: str, label: str) -> dict:
 def flag(
     invoice_id: str,
     payload: FlagIn,
-    actor: Actor = Depends(as_actor),
-    user: CurrentUser = Depends(require_role("admin", "accountant", "pe")),
+    actor: Actor = Depends(
+        require_agent_or_role("admin", "accountant", "pe")
+    ),
 ):
-    """Flag an invoice from any state, with a reason."""
+    """Flag an invoice, with a reason.
+
+    Open to the Chrome session (§11). §7.6 step 5: on any stop-and-ask
+    condition the session leaves the record in `approved`, flags it with the
+    reason, and moves to the next invoice — so this is the one write the
+    session makes that is not a success report. It is also the only reason
+    the agent is trusted with a write at all; it can raise a hand, never
+    lower one.
+    """
     row = _fetch_invoice(invoice_id)
     if row["status"] == "void":
         raise HTTPException(
             status_code=409, detail="A voided invoice cannot be flagged."
+        )
+    if row["status"] in ("uploaded", "filed"):
+        # Flagging replaces the status, and /flagged offers actions — void,
+        # re-run the AI, reassign — that contradict a bill already sitting in
+        # BuilderTrend. A problem found after the save belongs on /uploads.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This invoice is already in BuilderTrend, so it cannot go "
+                "back into the flagged triage queue. Record what went wrong "
+                "on /uploads, or fix the bill in BuilderTrend."
+            ),
         )
     intake.flag_invoice(
         invoice_id,
@@ -651,7 +1130,7 @@ def flag(
         actor=actor,
         current_status=row["status"],
     )
-    return get_invoice(invoice_id, user=user)
+    return _detail(invoice_id)
 
 
 @router.post("/{invoice_id}/unflag", response_model=InvoiceDetail)
@@ -691,7 +1170,7 @@ def unflag(
         actor=actor,
         diff={"cleared_flag": row.get("flag_code")},
     )
-    return get_invoice(invoice_id, user=user)
+    return _detail(invoice_id)
 
 
 @router.post("/{invoice_id}/not-duplicate", response_model=InvoiceDetail)
@@ -738,7 +1217,7 @@ def mark_not_duplicate(
             "note": payload.note,
         },
     )
-    return get_invoice(invoice_id, user=user)
+    return _detail(invoice_id)
 
 
 @router.post("/{invoice_id}/retry-suggestion", response_model=InvoiceDetail)
@@ -789,7 +1268,7 @@ def retry_suggestion(
         log.exception("retry-suggestion failed for %s", invoice_id)
         raise HTTPException(status_code=502, detail=f"The AI call failed: {e}")
 
-    return get_invoice(invoice_id, user=user)
+    return _detail(invoice_id)
 
 
 @router.post("/{invoice_id}/void", response_model=InvoiceDetail)
@@ -814,7 +1293,7 @@ def void(
             ),
         )
     if row["status"] == "void":
-        return get_invoice(invoice_id, user=user)
+        return _detail(invoice_id)
 
     _sb().table("invoices").update(
         {
@@ -832,7 +1311,7 @@ def void(
         actor=actor,
         diff={"reason": payload.reason},
     )
-    return get_invoice(invoice_id, user=user)
+    return _detail(invoice_id)
 
 
 # ─── Workflow transitions (prompt §7.3–7.5) ───────────────────────────
@@ -900,7 +1379,7 @@ def assign(
     except state_machine.TransitionError as e:
         raise _transition_error(e)
 
-    return get_invoice(updated["id"], user=user)
+    return _detail(updated["id"])
 
 
 @router.post("/bulk-assign", response_model=BulkAssignResult)
@@ -1020,7 +1499,7 @@ def reassign(
         actor=actor,
         action="reassigned",
     )
-    return get_invoice(invoice_id, user=user)
+    return _detail(invoice_id)
 
 
 @router.post("/{invoice_id}/mark-reviewed", response_model=InvoiceDetail)
@@ -1070,7 +1549,7 @@ def mark_reviewed(
     except state_machine.TransitionError as e:
         raise _transition_error(e)
 
-    return get_invoice(updated["id"], user=user)
+    return _detail(updated["id"])
 
 
 @router.post("/{invoice_id}/approve", response_model=InvoiceDetail)
@@ -1102,7 +1581,7 @@ def approve(
     except state_machine.TransitionError as e:
         raise _transition_error(e)
 
-    return get_invoice(updated["id"], user=user)
+    return _detail(updated["id"])
 
 
 @router.post("/{invoice_id}/reject", response_model=InvoiceDetail)
@@ -1133,7 +1612,7 @@ def reject(
     except state_machine.TransitionError as e:
         raise _transition_error(e)
 
-    return get_invoice(updated["id"], user=user)
+    return _detail(updated["id"])
 
 
 # ─── Shared validation ────────────────────────────────────────────────
@@ -1177,3 +1656,232 @@ def _require_active_user(
             ),
         )
     return found
+
+
+# ─── Upload and filing (prompt §7.6, §7.7, §11) ───────────────────────
+
+
+@router.post("/{invoice_id}/mark-uploaded", response_model=MarkUploadedOut)
+def mark_uploaded(
+    invoice_id: str,
+    payload: MarkUploadedIn,
+    actor: Actor = Depends(require_agent_or_role("admin", "accountant")),
+):
+    """§7.6 step 3: record a verified BuilderTrend save, then file the PDF.
+
+    This is the endpoint §12 names: "reject if `approved_at` is null". The
+    check lives in the state machine precondition so it cannot be bypassed by
+    a future caller, and it is enforced here rather than inferred from the
+    status column.
+
+    The double-save guard is SOP §8.4 — "never click Save twice without
+    checking whether the first one fired, that's how duplicate bills get
+    created". Calling this twice with the same bill id is a quiet success, so
+    a session that lost its connection mid-batch can safely replay. Calling
+    it with a *different* bill id is a 409, because that means two bills now
+    exist for one invoice and somebody has to go delete one.
+    """
+    row = _fetch_invoice(invoice_id)
+    bill_id = payload.bt_bill_id
+
+    # ── Replay, or a second bill? ──
+    if row["status"] in ("uploaded", "filed"):
+        if (row.get("bt_bill_id") or "") == bill_id:
+            return MarkUploadedOut(
+                invoice=_detail(invoice_id),
+                filing=_filing_status(row),
+                already_recorded=True,
+            )
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"This invoice is already recorded as bill "
+                f"{row.get('bt_bill_id')!r} in BuilderTrend, and you are "
+                f"reporting {bill_id!r}. That means two bills exist for one "
+                "invoice. Stop, check BuilderTrend, and delete the duplicate "
+                "before recording anything else."
+            ),
+        )
+
+    # The same bill id on a *different* invoice is the other half of the same
+    # failure: a save that landed on the wrong record. The unique index on
+    # bt_bill_id is the real guarantee; this is the readable error.
+    clash = (
+        _sb()
+        .table("invoices")
+        .select("id,invoice_no")
+        .eq("bt_bill_id", bill_id)
+        .neq("id", invoice_id)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    if clash:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"BuilderTrend bill {bill_id!r} is already recorded against "
+                f"invoice {clash[0].get('invoice_no') or clash[0]['id']}. "
+                "Check which invoice the bill actually belongs to before "
+                "recording this one."
+            ),
+        )
+
+    try:
+        updated = state_machine.apply(
+            invoice=row,
+            transition=state_machine.MARK_UPLOADED,
+            actor=actor,
+            extra_fields={"bt_bill_id": bill_id},
+            diff={"bt_bill_id": bill_id, "note": payload.note},
+        )
+    except state_machine.TransitionError as e:
+        raise _transition_error(e)
+    except Exception as e:  # noqa: BLE001
+        # The unique index on bt_bill_id is the real duplicate guard; the
+        # checks above are the readable version of it and lose to a race
+        # between two concurrent reports. Translate the constraint violation
+        # rather than letting it surface as a 500, because "two bills exist"
+        # is something the operator has to act on, not retry.
+        if _is_duplicate_bill_id_violation(e):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"BuilderTrend bill {bill_id!r} is already recorded "
+                    "against another invoice. Two reports arrived at once. "
+                    "Check BuilderTrend for which invoice the bill belongs "
+                    "to before recording anything else."
+                ),
+            )
+        raise
+
+    # §14: filing runs in the backend, right here, because it is
+    # deterministic. Best-effort by design — the bill is already saved, and a
+    # missing Drive folder must not make a successful upload look failed.
+    outcome = filing.file_and_record(invoice=updated, actor=actor)
+
+    return MarkUploadedOut(
+        invoice=_detail(invoice_id),
+        filing=FilingOut(
+            filed=outcome["filed"],
+            filed_path=outcome["filed_path"],
+            original_archived=bool(
+                (outcome.get("invoice") or {}).get("original_archived")
+            ),
+            error=outcome["error"],
+            needs_folder=outcome["needs_folder"],
+            warnings=outcome["warnings"],
+        ),
+        already_recorded=False,
+    )
+
+
+@router.post("/{invoice_id}/mark-filed", response_model=MarkUploadedOut)
+def mark_filed(
+    invoice_id: str,
+    payload: MarkFiledIn,
+    actor: Actor = Depends(require_agent_or_role("admin", "accountant")),
+):
+    """§7.7: file the PDF copy and archive the original, or record that
+    someone else already did.
+
+    Two modes, and the payload says which:
+
+      - **No `filed_path`** — the backend files now. This is the retry button
+        on /uploads after a filing failure, and the path §14 prefers.
+      - **`filed_path` set** — record a copy filed outside the app. §14
+        allows Chrome to do this step "if Phase 3 shows Drive permissions
+        make that awkward", and a manual filing needs recording too.
+
+    Either way the invoice has to already be `uploaded`: filing before the
+    bill exists in BuilderTrend would archive the original out of the intake
+    folder while the invoice is still unentered.
+    """
+    row = _fetch_invoice(invoice_id)
+
+    if row["status"] == "filed":
+        # Idempotent: a replayed call after a successful filing is a success.
+        return MarkUploadedOut(
+            invoice=_detail(invoice_id),
+            filing=_filing_status(row),
+            already_recorded=True,
+        )
+
+    if payload.filed_path:
+        try:
+            updated = state_machine.apply(
+                invoice=row,
+                transition=state_machine.MARK_FILED,
+                actor=actor,
+                extra_fields={
+                    "filed_path": payload.filed_path,
+                    "original_archived": payload.original_archived,
+                    "filing_error": None,
+                    "filing_warnings": (
+                        []
+                        if payload.original_archived
+                        else [
+                            "Filed outside the app and reported as not "
+                            "archived. The Drive original is still in the "
+                            "intake folder."
+                        ]
+                    ),
+                },
+                diff={"filed_path": payload.filed_path, "filed_externally": True},
+            )
+        except state_machine.TransitionError as e:
+            raise _transition_error(e)
+        return MarkUploadedOut(
+            invoice=_detail(invoice_id), filing=_filing_status(updated)
+        )
+
+    if row["status"] != "uploaded":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"This invoice is {row['status']}. Filing happens after the "
+                "bill is saved in BuilderTrend, so there is nothing to file "
+                "yet."
+            ),
+        )
+
+    outcome = filing.file_and_record(invoice=row, actor=actor)
+    if not outcome["filed"]:
+        # 502 rather than 500: the failure is in Drive, not in this app, and
+        # the message says what a person has to do about it.
+        raise HTTPException(status_code=502, detail=outcome["error"])
+
+    return MarkUploadedOut(
+        invoice=_detail(invoice_id),
+        filing=FilingOut(
+            filed=True,
+            filed_path=outcome["filed_path"],
+            original_archived=bool(
+                (outcome.get("invoice") or {}).get("original_archived")
+            ),
+            warnings=outcome["warnings"],
+        ),
+    )
+
+
+def _is_duplicate_bill_id_violation(e: Exception) -> bool:
+    """Is this Postgres 23505 on idx_invoices_bt_bill_id?
+
+    Matched on both the SQLSTATE and the index name so an unrelated unique
+    violation still surfaces as a 500 with an error id, rather than being
+    mislabelled as a duplicate bill.
+    """
+    code = getattr(e, "code", None) or (getattr(e, "args", [{}])[0] if e.args else None)
+    text = f"{code} {e}".lower()
+    return "23505" in text and "bt_bill_id" in text
+
+
+def _filing_status(row: dict) -> FilingOut:
+    return FilingOut(
+        filed=bool(row.get("filed_at")),
+        filed_path=row.get("filed_path"),
+        original_archived=bool(row.get("original_archived")),
+        error=row.get("filing_error"),
+        warnings=list(row.get("filing_warnings") or []),
+    )

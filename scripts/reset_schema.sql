@@ -2,7 +2,7 @@
 -- ║  DESTRUCTIVE — drops every table this app owns, and all their data.    ║
 -- ║                                                                        ║
 -- ║  For use during initial setup only, when a migration failed partway    ║
--- ║  through and you want a clean slate before re-running 001, 002, 003.   ║
+-- ║  through and you want a clean slate before re-running 001 to 004.      ║
 -- ║                                                                        ║
 -- ║  Never run this against a database holding real invoices.              ║
 -- ║                                                                        ║
