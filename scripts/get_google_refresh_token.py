@@ -72,7 +72,14 @@ SCOPE_SETS = {
     "both": DRIVE_SCOPES + GMAIL_SCOPES,
 }
 
-ENV_VAR_NAMES = {
+# The client id and secret live under GMAIL_OAUTH_* because that is the pair
+# the app treats as canonical: Drive falls back to it when GOOGLE_OAUTH_* is
+# unset, but Gmail has no fallback the other way. Printing GOOGLE_OAUTH_* for
+# a gmail-only run would leave email_enabled False with nothing to explain it.
+CLIENT_ID_VAR = "GMAIL_OAUTH_CLIENT_ID"
+CLIENT_SECRET_VAR = "GMAIL_OAUTH_CLIENT_SECRET"
+
+REFRESH_TOKEN_VARS = {
     "drive": "DRIVE_OAUTH_REFRESH_TOKEN",
     "gmail": "GMAIL_OAUTH_REFRESH_TOKEN",
 }
@@ -129,19 +136,19 @@ def main() -> None:
     print("\n" + "=" * 68)
     print("Paste these into Render (Environment):")
     print("=" * 68)
-    print(f"GOOGLE_OAUTH_CLIENT_ID={creds.client_id}")
-    print(f"GOOGLE_OAUTH_CLIENT_SECRET={creds.client_secret}")
+    print(f"{CLIENT_ID_VAR}={creds.client_id}")
+    print(f"{CLIENT_SECRET_VAR}={creds.client_secret}")
 
     if args.scopes == "both":
-        print(f"DRIVE_OAUTH_REFRESH_TOKEN={creds.refresh_token}")
         print(f"GMAIL_OAUTH_REFRESH_TOKEN={creds.refresh_token}")
+        print(f"DRIVE_OAUTH_REFRESH_TOKEN={creds.refresh_token}")
         print(
-            "\n(Same token twice — one consent covered both scopes. The app "
-            "keeps them as separate variables so you can later point Drive "
-            "and Gmail at different accounts without re-minting both.)"
+            "\n(Same token twice — one consent covered both scopes. They stay "
+            "separate variables so you can later point Drive and Gmail at "
+            "different accounts without re-minting both.)"
         )
     else:
-        print(f"{ENV_VAR_NAMES[args.scopes]}={creds.refresh_token}")
+        print(f"{REFRESH_TOKEN_VARS[args.scopes]}={creds.refresh_token}")
 
     if args.scopes in ("gmail", "both"):
         print(
@@ -149,6 +156,15 @@ def main() -> None:
             "as — Gmail rewrites the From header to it regardless."
         )
         print("And EMAIL_PROVIDER=gmail_api.")
+
+    if args.scopes == "drive":
+        print(
+            "\nThe client id and secret go under GMAIL_OAUTH_* even for a "
+            "Drive-only run: Drive falls back to that pair, and naming them "
+            "once avoids two copies to keep in sync. Use GOOGLE_OAUTH_CLIENT_ID "
+            "and GOOGLE_OAUTH_CLIENT_SECRET only if Drive needs a DIFFERENT "
+            "OAuth client from the mail sender."
+        )
 
     print("=" * 68)
     print(

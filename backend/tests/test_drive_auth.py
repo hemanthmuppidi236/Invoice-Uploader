@@ -19,14 +19,19 @@ from app.core.config import Settings
 def settings_with(**over):
     """A Settings instance with the required fields filled and the rest
     overridden. Built fresh rather than mutated, so property logic is
-    exercised the way it runs in production."""
+    exercised the way it runs in production.
+
+    `_env_file=None` disables the dotenv read. Without it, a developer's
+    populated `.env` supplies the very fields these tests assert are absent,
+    and the half-set-credential cases silently pass for the wrong reason.
+    """
     base = {
         "supabase_url": "https://t.supabase.co",
         "supabase_anon_key": "anon",
         "supabase_service_role_key": "service",
     }
     base.update(over)
-    return Settings(**base)
+    return Settings(_env_file=None, **base)
 
 
 SERVICE_ACCOUNT_JSON = json.dumps(
@@ -209,3 +214,68 @@ def test_service_account_credentials_are_built_from_the_key(monkeypatch):
     creds = drive._build_credentials()
     assert creds.service_account_email == "svc@p.iam.gserviceaccount.com"
     assert "https://www.googleapis.com/auth/drive" in creds.scopes
+
+
+# ─── The setup script must name the variables Settings actually reads ──
+
+
+def test_the_token_script_prints_variable_names_the_app_reads():
+    """The script's output is copy-pasted straight into Render, so a name it
+    prints that Settings does not read leaves the integration silently off.
+
+    This shipped wrong once: a gmail-only run printed GOOGLE_OAUTH_CLIENT_ID,
+    but `email_enabled` checks `gmail_oauth_client_id`, so following the
+    output literally left email disabled with nothing to explain it.
+    """
+    from pathlib import Path
+    import re
+
+    script = (
+        Path(__file__).resolve().parents[2]
+        / "scripts"
+        / "get_google_refresh_token.py"
+    ).read_text()
+
+    printed = set(re.findall(r'"([A-Z][A-Z0-9_]{4,})"', script))
+    printed |= set(re.findall(r'f"\{?([A-Z][A-Z0-9_]{4,})\}?=', script))
+    printed |= set(re.findall(r"\b([A-Z][A-Z0-9_]{4,})=\{creds", script))
+
+    known = {f.upper() for f in Settings.model_fields}
+    # Names the script mentions as prose rather than as a variable to set.
+    prose = {"DRIVE_SCOPES", "GMAIL_SCOPES", "SCOPE_SETS", "CLIENT_ID_VAR",
+             "CLIENT_SECRET_VAR", "REFRESH_TOKEN_VARS"}
+
+    unknown = {p for p in printed if p not in known and p not in prose}
+    assert not unknown, (
+        f"get_google_refresh_token.py names {sorted(unknown)}, which "
+        f"Settings does not read. Anything pasted under those names is "
+        f"ignored, and the integration stays off with no error."
+    )
+
+
+def test_gmail_client_vars_have_no_fallback_so_the_script_must_print_them():
+    """Drive falls back to the Gmail client pair, but not the reverse. That
+    asymmetry is why the script prints GMAIL_OAUTH_* for every scope."""
+    # email_provider is passed explicitly because conftest forces log_only
+    # suite-wide, which would make both halves of this comparison False and
+    # the test pass for the wrong reason.
+    only_google = settings_with(
+        email_provider="gmail_api",
+        google_oauth_client_id="cid",
+        google_oauth_client_secret="csecret",
+        gmail_oauth_refresh_token="rtoken",
+        gmail_sender_email="a@b.com",
+    )
+    assert only_google.email_enabled is False, (
+        "GOOGLE_OAUTH_* must not satisfy Gmail — if it ever does, the script "
+        "can print either name and this asymmetry note is stale."
+    )
+
+    proper = settings_with(
+        email_provider="gmail_api",
+        gmail_oauth_client_id="cid",
+        gmail_oauth_client_secret="csecret",
+        gmail_oauth_refresh_token="rtoken",
+        gmail_sender_email="a@b.com",
+    )
+    assert proper.email_enabled is True
