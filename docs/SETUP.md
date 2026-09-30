@@ -382,7 +382,22 @@ CORS_ORIGINS=https://your-app.vercel.app
 
 ### Frontend — Vercel
 
-Import the repo, root directory `frontend`. Three variables:
+**Set the Root Directory to `frontend` before anything else.** Settings →
+General → Root Directory. This repo holds two apps, and Vercel's detector
+reaches `backend/` first: left at the repo root it tries to deploy the
+FastAPI backend and the build dies with
+
+```
+Error: No FastAPI entrypoint found. Set "tool.vercel.entrypoint" in
+pyproject.toml or define an entrypoint in one of: app.py, index.py, ...
+```
+
+That message names a Python problem, so it reads like the backend is
+misconfigured. It is not — Vercel is simply pointed at the wrong half of the
+repo. With the root directory set, the framework preset detects Next.js on
+its own.
+
+Then three variables:
 
 ```bash
 NEXT_PUBLIC_SUPABASE_URL=https://<ref>.supabase.co
@@ -437,7 +452,9 @@ BuilderTrend upload.
 | Google demands app verification | The consent screen is External and `drive` is a restricted scope. Switch to Internal (§2.2). |
 | Email worked, then stopped a week later | The consent screen is External + Testing; refresh tokens expire in 7 days |
 | Every request 403s | Your `app_users` row still has `viewer`; run `scripts/bootstrap_admin.sql` |
-| Vercel page is unavailable / 500 on every route | The three `NEXT_PUBLIC_*` variables are missing. The middleware builds a Supabase client on every request and throws without them. They are inlined at build time, so **redeploy** after adding them — saving them alone changes nothing. |
+| Vercel build fails with `No FastAPI entrypoint found` | Root Directory is not set to `frontend`, so Vercel is building the backend. See §7 |
+| Vercel page is unavailable, but the build "succeeded" | Usually the same cause: Vercel built something that is not the Next.js app. Check the build log names Next.js. If it does, the three `NEXT_PUBLIC_*` variables are missing — the middleware builds a Supabase client on every request and throws without them |
+| Added the `NEXT_PUBLIC_*` variables and nothing changed | They are inlined at build time. Saving them does nothing on its own; **redeploy** |
 | The app loads but every API call fails | `NEXT_PUBLIC_API_URL` is wrong, or the backend's `CORS_ORIGINS` does not list the exact Vercel URL including `https://` |
 | 500s mentioning RLS | A `NEXT_PUBLIC_*` variable was given the `service_role` key, or the backend was given the `anon` key |
 | Render deploy exits 1 with `ValidationError ... Field required` | A required backend variable is unset. The startup error names every missing one and where to find it — read the line above the traceback, not the traceback |

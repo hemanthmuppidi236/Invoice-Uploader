@@ -209,6 +209,39 @@ _WHERE_TO_FIND = {
 }
 
 
+def _near_miss_hint(missing: list[str]) -> list[str]:
+    """List the similarly-named variables that ARE set.
+
+    The error pydantic raises names the *field* it wanted, not the variable
+    you typed — so `SUPABASE_ANNON_KEY`, a trailing space, and nothing at all
+    all produce the identical message. Someone who has just checked that the
+    value they pasted is correct has no way to see that the key beside it is
+    not. Printing the neighbouring names closes that gap.
+
+    Names only, never values: this goes into a deploy log.
+    """
+    import os
+
+    stems = {name.split("_")[0] for name in missing}
+    present = sorted(
+        key
+        for key in os.environ
+        if any(key.upper().startswith(stem) for stem in stems)
+        and key.upper() not in missing
+    )
+    if not present:
+        return []
+    return [
+        "Related variables that ARE set (names only):",
+        *(f"  {key}" for key in present),
+        "",
+        "If one of those is the value you meant to supply, the name is "
+        "wrong — a typo, a trailing space, or a NEXT_PUBLIC_ prefix that "
+        "belongs on the frontend only. Fix the name, not the value.",
+        "",
+    ]
+
+
 def _load_settings() -> Settings:
     """Build Settings, or fail with an error a person can act on.
 
@@ -238,6 +271,7 @@ def _load_settings() -> Settings:
                 lines.append(f"  {name}")
                 lines.append(f"      {_WHERE_TO_FIND.get(name, 'See backend/.env.example')}")
                 lines.append("")
+            lines.extend(_near_miss_hint(missing))
         if invalid:
             lines.append("Invalid value(s):")
             lines.extend(f"  {item}" for item in invalid)

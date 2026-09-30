@@ -87,3 +87,48 @@ def test_a_complete_configuration_still_loads(monkeypatch):
 
     loaded = _load_settings()
     assert loaded.supabase_url == "https://x.supabase.co"
+
+
+def test_a_near_miss_name_is_surfaced(monkeypatch):
+    """The error names the pydantic FIELD, not the variable you typed, so a
+    typo'd key and no key at all read identically. Somebody who has just
+    verified the value they pasted has no way to see that the name beside it
+    is wrong — unless the neighbours are printed."""
+    _blank(monkeypatch, "SUPABASE_ANON_KEY")
+    monkeypatch.setenv("SUPABASE_URL", "https://x.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
+    monkeypatch.setenv("SUPABASE_ANNON_KEY", "eyJ-the-right-value-wrong-name")
+
+    with pytest.raises(RuntimeError) as e:
+        _load_settings()
+
+    message = str(e.value)
+    assert "SUPABASE_ANNON_KEY" in message
+    assert "the name is wrong" in message
+
+
+def test_no_value_is_ever_printed(monkeypatch):
+    """This lands in a deploy log. Names diagnose the problem; values would
+    put a service-role key somewhere it can be read forever."""
+    secret = "eyJ-this-must-never-appear-in-a-log"
+    _blank(monkeypatch, "SUPABASE_ANON_KEY")
+    monkeypatch.setenv("SUPABASE_URL", "https://x.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", secret)
+    monkeypatch.setenv("SUPABASE_ANNON_KEY", secret)
+
+    with pytest.raises(RuntimeError) as e:
+        _load_settings()
+    assert secret not in str(e.value)
+
+
+def test_unrelated_variables_are_not_listed(monkeypatch):
+    """A dump of the whole environment is noise, and noise is what stops the
+    one useful line being read."""
+    _blank(monkeypatch, "SUPABASE_ANON_KEY")
+    monkeypatch.setenv("SUPABASE_URL", "https://x.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
+
+    with pytest.raises(RuntimeError) as e:
+        _load_settings()
+    assert "ANTHROPIC_API_KEY" not in str(e.value)
