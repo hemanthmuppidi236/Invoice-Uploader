@@ -1,11 +1,14 @@
 -- ╔═══════════════════════════════════════════════════════════════════════╗
 -- ║  User seed TEMPLATE — fill in the real emails, then apply as           ║
--- ║  migrations/004_seed_users.sql                                         ║
+-- ║  migrations/005_seed_users.sql (004 is the Phase 3 filing migration)   ║
 -- ║                                                                        ║
 -- ║  Why a template: prompt §3 names the people (Linda, Raz, Shant,        ║
 -- ║  Hemanth, the PEs) but the §15 kickoff block never supplied their      ║
 -- ║  email addresses. Only Linda's is known, from SOP §1. Guessing an      ║
 -- ║  address would seed a row that never matches a real Google login.      ║
+-- ║                                                                        ║
+-- ║  To get just YOURSELF in as admin today, use                           ║
+-- ║  scripts/bootstrap_admin.sql instead — this file is all-or-nothing.    ║
 -- ║                                                                        ║
 -- ║  Rows seeded here get a placeholder UUID. The auth.users trigger in    ║
 -- ║  migration 001 claims the row by email on first sign-in and re-points  ║

@@ -195,16 +195,18 @@ Three layers, all already in place:
 
 ### 3.5 First sign-in
 
-Start the app, sign in as yourself, then promote yourself in the Supabase SQL
-editor — you land as `viewer` like everyone else:
+Start the app, sign in as yourself, then promote yourself — you land as
+`viewer` like everyone else, and `/admin` is where roles are managed, so
+somebody has to be promoted from outside the app once.
 
-```sql
-update app_users
-   set role = array['admin']::text[]
- where email = 'your.email@ferrocretebuilders.com';
-```
+Edit the address at the top of **`scripts/bootstrap_admin.sql`** and run it in
+the Supabase SQL editor. It refuses to apply if no row matches, which is the
+difference that matters: a typo'd address otherwise leaves you a viewer with
+nothing saying why.
 
-Everyone else goes through `/admin → Users and roles` after that.
+Everyone else goes through `/admin → Users and roles` after that. Once you
+have the whole team's addresses, `scripts/seed_users.sql.example` seeds them
+in one go.
 
 ---
 
@@ -412,13 +414,19 @@ fastest way to find a missing key:
 ```json
 {
   "status": "ok",
-  "integrations": { "claude": true, "drive": true, "email": true, "agent_auth": true },
+  "integrations": {
+    "claude": true, "drive": true, "drive_auth": "oauth_user",
+    "filing": true, "email": true, "agent_auth": true
+  },
   "jobs_paused": false
 }
 ```
 
 A `false` there means that integration's environment variables are incomplete,
-not that the service is down.
+not that the service is down. `filing` is reported separately from `drive`
+because intake needs only the intake folder: Drive credentials without
+`DRIVE_FOLDER_BT_INVOICES` look healthy right up to the first successful
+BuilderTrend upload.
 
 | Symptom | Almost always |
 |---|---|
@@ -428,6 +436,8 @@ not that the service is down.
 | Cannot create a service account | Org policy `iam.disableServiceAccountCreation`. Use §4 option B; no admin exception needed. |
 | Google demands app verification | The consent screen is External and `drive` is a restricted scope. Switch to Internal (§2.2). |
 | Email worked, then stopped a week later | The consent screen is External + Testing; refresh tokens expire in 7 days |
-| Every request 403s | Your `app_users` row still has `viewer`; promote it |
+| Every request 403s | Your `app_users` row still has `viewer`; run `scripts/bootstrap_admin.sql` |
+| Vercel page is unavailable / 500 on every route | The three `NEXT_PUBLIC_*` variables are missing. The middleware builds a Supabase client on every request and throws without them. They are inlined at build time, so **redeploy** after adding them — saving them alone changes nothing. |
+| The app loads but every API call fails | `NEXT_PUBLIC_API_URL` is wrong, or the backend's `CORS_ORIGINS` does not list the exact Vercel URL including `https://` |
 | 500s mentioning RLS | A `NEXT_PUBLIC_*` variable was given the `service_role` key, or the backend was given the `anon` key |
 | `42P17: functions in index expression must be marked IMMUTABLE` | You are on a migration 001 from before 2026-09-30. Pull the latest — `created_at::DATE` on a TIMESTAMPTZ is STABLE and Postgres rejects it in an index. |
