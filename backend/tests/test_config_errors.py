@@ -132,3 +132,52 @@ def test_unrelated_variables_are_not_listed(monkeypatch):
     with pytest.raises(RuntimeError) as e:
         _load_settings()
     assert "ANTHROPIC_API_KEY" not in str(e.value)
+
+
+# ─── Invisible characters from a dashboard copy-paste ─────────────────
+
+
+@pytest.mark.parametrize(
+    "junk,label",
+    [
+        ("\n", "a trailing newline"),
+        (" ", "a trailing space"),
+        (" ", "U+2028 LINE SEPARATOR"),
+        (" ", "a non-breaking space"),
+        ("﻿", "a byte-order mark"),
+        ("​", "a zero-width space"),
+    ],
+)
+def test_an_invisible_character_is_stripped_from_the_keys(monkeypatch, junk, label):
+    """None of these are visible in a Render or Vercel settings field, and
+    none break anything until the value goes into an HTTP header — at which
+    point the runtime refuses it with a message naming a byte offset and no
+    variable: "Cannot convert argument to a ByteString because the character
+    at index 215 has a value of 8232". Neither a URL nor a JWT ever
+    legitimately contains whitespace, so stripping it is safe."""
+    _blank(monkeypatch)
+    monkeypatch.setenv("SUPABASE_URL", f"https://x.supabase.co{junk}")
+    monkeypatch.setenv("SUPABASE_ANON_KEY", f"{junk}eyJanon{junk}")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", f"eyJsvc{junk}")
+
+    loaded = _load_settings()
+    assert loaded.supabase_url == "https://x.supabase.co", label
+    assert loaded.supabase_anon_key == "eyJanon", label
+    assert loaded.supabase_service_role_key == "eyJsvc", label
+
+
+def test_every_stripped_value_is_header_safe(monkeypatch):
+    """The actual invariant: whatever comes out can be put in an HTTP header.
+    Latin-1 encodability is exactly the check the runtime was failing."""
+    _blank(monkeypatch)
+    monkeypatch.setenv("SUPABASE_URL", "https://x.supabase.co ")
+    monkeypatch.setenv("SUPABASE_ANON_KEY", "eyJanon ")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "eyJsvc﻿")
+
+    loaded = _load_settings()
+    for value in (
+        loaded.supabase_url,
+        loaded.supabase_anon_key,
+        loaded.supabase_service_role_key,
+    ):
+        value.encode("latin-1")  # raises if a character is above 255

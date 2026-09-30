@@ -7,10 +7,18 @@ at import time or the process refuses to start. A missing SUPABASE_URL should
 crash on boot, not on the first request.
 """
 
+import re
 from typing import Optional
 
-from pydantic import ValidationError
+from pydantic import ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+# Every Unicode whitespace and separator, not just the ASCII ones. U+2028
+# and U+FEFF are the two that survive a copy-paste unnoticed.
+_INVISIBLE = re.compile(
+    r"[\s\u00a0\u1680\u2000-\u200b\u2028\u2029\u202f\u205f\u3000\ufeff]"
+)
 
 
 class Settings(BaseSettings):
@@ -27,6 +35,33 @@ class Settings(BaseSettings):
     supabase_url: str
     supabase_anon_key: str                 # verifying user JWTs
     supabase_service_role_key: str         # backend writes (bypasses RLS)
+
+    @field_validator(
+        "supabase_url",
+        "supabase_anon_key",
+        "supabase_service_role_key",
+        mode="before",
+    )
+    @classmethod
+    def _strip_invisibles(cls, v):
+        """Drop whitespace a dashboard copy-paste smuggled in.
+
+        A JWT copied out of the Supabase dashboard arrives often enough with
+        a trailing newline, a non-breaking space, or a U+2028 LINE SEPARATOR —
+        none of them visible in a Render or Vercel settings field. Nothing
+        breaks until the value goes into an HTTP header, and then the runtime
+        refuses it with a message that names a byte offset and no variable:
+
+            Cannot convert argument to a ByteString because the character at
+            index 215 has a value of 8232 which is greater than 255.
+
+        Neither a URL nor a JWT ever legitimately contains whitespace, so
+        removing all of it is safe, and it is the difference between a
+        configuration that works and an hour spent on an OAuth callback.
+        """
+        if not isinstance(v, str):
+            return v
+        return _INVISIBLE.sub("", v)
 
     # ─── Storage buckets (create these in Supabase Storage) ───────────
     bucket_invoices: str = "invoices"
