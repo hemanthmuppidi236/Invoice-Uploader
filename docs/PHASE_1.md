@@ -145,9 +145,14 @@ who waits, and the oldest invoice is the most overdue vendor.
 
 ## 5. Running the gate
 
-You can run the whole gate without Drive, using `/admin` and the UI:
+**Drive is required for this gate.** There is no route that creates an
+invoice — `poll_drive` is the only thing that inserts one, deliberately, so
+that every invoice carries a `source_file_id` and the idempotency index has
+something to key on. Everything downstream (review, approval, upload) can be
+exercised on an invoice once it exists, but getting the first one in means
+Drive credentials.
 
-1. Confirm `GET /health` shows `"claude": true`.
+1. Confirm `GET /health` shows `"claude": true` and `"drive": true`.
 2. Onboard A Street Flats with its CMD-01 submittal (Phase 0), so mix
    `6011000` exists and maps to `3002 - Concrete Walls`.
 3. Put the CalPortland invoice in `Invoice Uploads/` and either wait for the
