@@ -43,7 +43,26 @@ class Settings(BaseSettings):
     claude_max_tokens: int = 16000
 
     # ─── Google Drive (intake + filing, Phase 1/3) ────────────────────
+    # Two supported ways to authenticate, checked in this order:
+    #
+    #   1. A service account JSON key. Simplest when your Google org allows
+    #      service accounts, and the identity is not tied to a person.
+    #   2. OAuth user credentials with a refresh token. The fallback when the
+    #      org policy `iam.disableServiceAccountCreation` is in force — the
+    #      same mechanism Gmail sending already uses. Consent once as an
+    #      account that can see the folders; the cron reuses the token.
+    #
+    # Prefer a shared ops mailbox over a real person's account for option 2:
+    # a refresh token is tied to whoever consented, and intake stops the day
+    # they leave or revoke it.
     google_drive_credentials_json: Optional[str] = None   # service account JSON
+
+    # Option 2. The client id and secret default to the Gmail ones, because
+    # a single Desktop OAuth client can carry both scopes.
+    google_oauth_client_id: Optional[str] = None
+    google_oauth_client_secret: Optional[str] = None
+    drive_oauth_refresh_token: Optional[str] = None
+
     drive_folder_invoice_uploads: Optional[str] = None    # folder id
     drive_folder_white_cap: Optional[str] = None          # folder id
     drive_folder_bt_invoices: Optional[str] = None        # folder id
@@ -107,12 +126,42 @@ class Settings(BaseSettings):
             and self.gmail_sender_email
         )
 
+    # ─── Drive credential resolution ──────────────────────────────────
+
+    @property
+    def drive_oauth_client_id(self) -> Optional[str]:
+        """Falls back to the Gmail client — one Desktop OAuth client can
+        carry both the drive and gmail.send scopes."""
+        return self.google_oauth_client_id or self.gmail_oauth_client_id
+
+    @property
+    def drive_oauth_client_secret(self) -> Optional[str]:
+        return self.google_oauth_client_secret or self.gmail_oauth_client_secret
+
+    @property
+    def drive_oauth_configured(self) -> bool:
+        return bool(
+            self.drive_oauth_client_id
+            and self.drive_oauth_client_secret
+            and self.drive_oauth_refresh_token
+        )
+
+    @property
+    def drive_auth_mode(self) -> Optional[str]:
+        """'service_account' | 'oauth_user' | None.
+
+        Reported on /health so a deploy that is missing one half of a
+        credential pair is visible without reading logs.
+        """
+        if self.google_drive_credentials_json:
+            return "service_account"
+        if self.drive_oauth_configured:
+            return "oauth_user"
+        return None
+
     @property
     def drive_enabled(self) -> bool:
-        return bool(
-            self.google_drive_credentials_json
-            and self.drive_folder_invoice_uploads
-        )
+        return bool(self.drive_auth_mode and self.drive_folder_invoice_uploads)
 
     @property
     def agent_auth_enabled(self) -> bool:

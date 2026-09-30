@@ -67,6 +67,7 @@ def health():
         "integrations": {
             "claude": settings.claude_enabled,
             "drive": settings.drive_enabled,
+            "drive_auth": settings.drive_auth_mode,
             "email": settings.email_enabled,
             "agent_auth": settings.agent_auth_enabled,
         },

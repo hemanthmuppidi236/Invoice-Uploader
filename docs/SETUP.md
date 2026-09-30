@@ -9,13 +9,17 @@ because three of them come from the same Google Cloud project:
 |---|---|---|---|---|
 | 1 | Supabase project keys | URL + two API keys | Database, auth, file storage | Phase 0 |
 | 2 | Google OAuth — **Web** client | Client ID + secret | People signing in to the app | Phase 0 |
-| 3 | Google **service account** | JSON key file | Reading and filing invoices on Drive | Phase 1 |
+| 3 | Drive access — **service account** JSON key, *or* an OAuth refresh token | either | Reading and filing invoices on Drive | Phase 1 |
 | 4 | Google OAuth — **Desktop** client | Client ID + secret + refresh token | Sending mail as Ferrocrete | Phase 2 |
 
 2 and 4 are both "OAuth client IDs" and are **not interchangeable**. The web
 one has a redirect URL and is used by Supabase; the desktop one is used once
 on your laptop to mint a refresh token. Creating one and using it for the
 other is the most common way this setup goes wrong.
+
+3 has two forms. If your Google org blocks service account creation — a
+common Workspace policy — use the OAuth route in §4, which reuses the same
+Desktop client as 4. No admin exception needed.
 
 ---
 
@@ -203,10 +207,21 @@ Everyone else goes through `/admin → Users and roles` after that.
 
 ---
 
-## 4. Drive access (service account) — Phase 1
+## 4. Drive access — Phase 1
 
-A service account, not an OAuth client: the poll runs unattended on a cron, so
-there is nobody to click a consent screen.
+Two ways to do this. Pick based on whether your Google org lets you create a
+service account.
+
+> **If "Create service account" is greyed out or errors**, your org enforces
+> `iam.disableServiceAccountCreation`. That is common in Workspace. Skip to
+> option B — it needs no admin involvement and is arguably a better fit here,
+> because the account you use already has the folders rather than needing to
+> be granted them.
+
+### Option A — service account
+
+Preferred where allowed: the identity belongs to the app, not to a person, so
+nothing breaks when someone leaves.
 
 1. **IAM & Admin → Service Accounts → Create service account**
    - Name: `ferrocrete-invoice-intake`
@@ -216,27 +231,78 @@ there is nobody to click a consent screen.
 3. **Share the Drive folders with the service account's email address**
    (it looks like `ferrocrete-invoice-intake@…iam.gserviceaccount.com`), with
    at least **Content manager** on the shared drive:
-   - `Invoice Uploads/`
-   - `White Cap/`
-   - `BT Invoices/` (Phase 3 filing)
+   `Invoice Uploads/`, `White Cap/`, and `BT Invoices/`.
 
    **This is the step that gets missed.** Without it the Drive API returns an
    empty file list rather than a permission error, which looks exactly like
    "no new invoices" and gives you nothing to debug.
-4. Get the folder IDs from each folder's URL — the part after `/folders/`.
-5. Set the backend environment:
+4. Set `GOOGLE_DRIVE_CREDENTIALS_JSON` to the whole key file as one line.
+
+### Option B — OAuth user credentials
+
+The same mechanism the app already uses for Gmail. You consent once as an
+account that can see the folders; the cron reuses the refresh token.
+
+1. You need the **Desktop OAuth client** from §5. If you have not made it yet,
+   do that first — one client covers both Drive and Gmail.
+2. Mint a Drive token:
 
    ```bash
-   # The whole JSON file contents, as one line
-   GOOGLE_DRIVE_CREDENTIALS_JSON={"type":"service_account",...}
-   DRIVE_FOLDER_INVOICE_UPLOADS=1AbC...
-   DRIVE_FOLDER_WHITE_CAP=1DeF...
-   DRIVE_FOLDER_BT_INVOICES=1GhI...
+   cd backend && .venv/bin/pip install google-auth-oauthlib
+   cd .. && backend/.venv/bin/python scripts/get_google_refresh_token.py --scopes drive
    ```
 
-Delete the downloaded JSON from your Downloads folder once it is in Render.
-`.gitignore` already blocks `service-account*.json`, but the safest copy is
-the one that does not exist.
+   Or `--scopes both` to cover Drive and Gmail in one consent, if the same
+   account should do both.
+
+3. **Sign in as the account the app should act as.** Prefer a shared ops
+   mailbox over a personal account: a refresh token belongs to whoever
+   consented, and intake stops the day they leave or revoke it in
+   <https://myaccount.google.com/permissions>.
+
+4. Paste the printed values:
+
+   ```bash
+   GOOGLE_OAUTH_CLIENT_ID=...
+   GOOGLE_OAUTH_CLIENT_SECRET=...
+   DRIVE_OAUTH_REFRESH_TOKEN=...
+   ```
+
+   If that account is also your mail sender, the client id and secret are
+   shared — the app falls back to the `GMAIL_OAUTH_` ones, so you can leave
+   `GOOGLE_OAUTH_*` unset and just supply the Drive token.
+
+**Two things specific to this option:**
+
+- The `drive` scope is a **restricted** scope. On an **Internal** consent
+  screen no app verification is needed. On an External one, Google requires a
+  verification review that takes weeks — another reason §2.2 matters.
+- Files the app writes in Phase 3 will be attributed to that account rather
+  than to a service account. For filed invoice copies that is normal and
+  arguably clearer.
+
+### Either way: the folder IDs
+
+Get them from the part of each folder's URL after `/folders/`:
+
+```bash
+DRIVE_FOLDER_INVOICE_UPLOADS=1AbC...
+DRIVE_FOLDER_WHITE_CAP=1DeF...
+DRIVE_FOLDER_BT_INVOICES=1GhI...     # Phase 3 filing
+```
+
+`GET /health` reports which mode is live:
+
+```json
+{ "integrations": { "drive": true }, "drive_auth": "oauth_user" }
+```
+
+`"drive_auth": null` with credentials set means a half-set pair — a refresh
+token with no client secret, or the reverse.
+
+Delete any downloaded key or client secret from your Downloads folder once the
+values are in Render. `.gitignore` blocks `service-account*.json` and
+`client_secret*.json`, but the safest copy is the one that does not exist.
 
 ---
 
@@ -248,12 +314,13 @@ A **second** OAuth client, separate from the web one in step 3.
    - Application type: **Desktop app**
    - Name: `Ferrocrete Invoice Processor — mail`
 2. **Download JSON** and save it as `scripts/client_secret.json` in this repo.
+   This is the same client §4 option B uses.
    It is gitignored.
 3. Mint the refresh token, once, on your laptop:
 
    ```bash
    cd backend && .venv/bin/pip install google-auth-oauthlib
-   cd .. && backend/.venv/bin/python scripts/get_gmail_refresh_token.py
+   cd .. && backend/.venv/bin/python scripts/get_google_refresh_token.py --scopes gmail
    ```
 
    A browser opens. **Sign in as the mailbox the app should send as** — not
@@ -273,7 +340,7 @@ A **second** OAuth client, separate from the web one in step 3.
    `GMAIL_SENDER_EMAIL` has to match the account that granted consent. Gmail
    rewrites the From header to that address regardless, so a mismatch means
    mail that appears to come from somewhere you did not expect.
-5. Delete `scripts/client_secret.json` once the refresh token is in Render.
+5. Delete `scripts/client_secret.json` once both refresh tokens are in Render.
 
 Test without waiting for the cron:
 
@@ -356,7 +423,9 @@ not that the service is down.
 |---|---|
 | Sign-in loops back to `/login` | The callback URL is missing from Supabase → Authentication → URL Configuration |
 | `redirect_uri_mismatch` from Google | The Web client's redirect URI is not the Supabase `/auth/v1/callback` one |
-| Poll finds nothing, no error | The Drive folders were never shared with the service account |
+| Poll finds nothing, no error | Service account mode: the folders were never shared with it. OAuth mode: the account you consented as cannot see them. |
+| Cannot create a service account | Org policy `iam.disableServiceAccountCreation`. Use §4 option B; no admin exception needed. |
+| Google demands app verification | The consent screen is External and `drive` is a restricted scope. Switch to Internal (§2.2). |
 | Email worked, then stopped a week later | The consent screen is External + Testing; refresh tokens expire in 7 days |
 | Every request 403s | Your `app_users` row still has `viewer`; promote it |
 | 500s mentioning RLS | A `NEXT_PUBLIC_*` variable was given the `service_role` key, or the backend was given the `anon` key |

@@ -116,8 +116,10 @@ summary.
 A double cron fire must not double-mail. The mechanism is `email_log`:
 
 1. **Insert the log row first**, claiming the slot. A unique index on
-   `(kind, recipient, created_at::date) WHERE error IS NULL` means a second
-   attempt for the same person, same kind, same day cannot insert.
+   `(kind, recipient, (created_at AT TIME ZONE 'UTC')::date) WHERE error IS
+   NULL` means a second attempt for the same person, same kind, same day
+   cannot insert. The zone is pinned as a literal because a bare
+   `timestamptz::date` is STABLE, and Postgres will not index it.
 2. **Send.**
 3. **On success**, stamp `sent_at`. The slot stays held.
 4. **On failure**, write the error — which drops the row out of the *partial*
@@ -140,9 +142,15 @@ because Render blocks outbound SMTP on every plan.
 
 1. In Google Cloud, create an OAuth client (Desktop app) and enable the Gmail
    API.
-2. Get a refresh token once. The pay app's
-   `scripts/get_gmail_refresh_token.py` does this — the only scope needed is
-   `gmail.send`.
+2. Get a refresh token once:
+
+   ```bash
+   backend/.venv/bin/python scripts/get_google_refresh_token.py --scopes gmail
+   ```
+
+   The only scope needed is `gmail.send`. Use `--scopes both` if the same
+   account should also be the one the Drive poll acts as (see
+   `docs/SETUP.md` §4 option B).
 3. Set the backend environment variables:
 
 ```bash

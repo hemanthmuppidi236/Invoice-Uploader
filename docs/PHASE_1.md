@@ -103,27 +103,29 @@ routing.
 
 ## 4. Setting up Drive
 
-The poll needs a Google service account with access to the shared drive.
+The poll needs unattended Google access. Two supported ways, covered in full
+in **[docs/SETUP.md §4](SETUP.md)**:
 
-1. In Google Cloud, create a service account and enable the Drive API.
-2. Create a JSON key.
-3. On the shared drive, grant that service account's email at least Content
-   manager on the folders below. **This step is the one that gets missed** —
-   without it the Drive API returns an empty file list rather than an error,
-   which looks exactly like "no new invoices".
-4. Set the backend environment variables:
+- **A service account** with the shared drive folders shared to it. Preferred
+  where your Google org allows creating one.
+- **OAuth user credentials** with a refresh token, minted by
+  `scripts/get_google_refresh_token.py --scopes drive`. The fallback when the
+  org enforces `iam.disableServiceAccountCreation`, and the same mechanism
+  Gmail sending uses.
+
+Either way you also need the three folder ids, taken from the part of each
+folder's URL after `/folders/`:
 
 ```bash
-# The JSON key, as a single line
-GOOGLE_DRIVE_CREDENTIALS_JSON={"type":"service_account",...}
-
-# Folder ids, from each folder's URL
 DRIVE_FOLDER_INVOICE_UPLOADS=1AbC...
 DRIVE_FOLDER_WHITE_CAP=1DeF...          # optional
 DRIVE_FOLDER_BT_INVOICES=1GhI...        # Phase 3 filing only
 ```
 
-`GET /health` reports `"drive": true` once it is wired up.
+`GET /health` reports `"drive": true` and names the mode in `"drive_auth"`
+once it is wired up. The failure worth knowing about: whichever identity you
+use, if it cannot see the folders the Drive API returns an **empty list rather
+than an error**, which is indistinguishable from "no new invoices".
 
 ### Render cron
 

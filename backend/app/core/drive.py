@@ -11,7 +11,19 @@ rather than left to the caller:
     creating, so a missing project or vendor folder flags for a person
     (§7.7, §12). SOP §7 makes this a stop-and-ask.
 
-Auth is a service account, which must be granted access to the shared drive.
+Two ways to authenticate, resolved in `_build_credentials()`:
+
+  - **Service account** (`GOOGLE_DRIVE_CREDENTIALS_JSON`). Preferred when the
+    Google org allows it: the identity is not tied to a person, so nothing
+    breaks when someone leaves. The account has to be granted access to the
+    shared drive explicitly.
+
+  - **OAuth user credentials** (`DRIVE_OAUTH_REFRESH_TOKEN`). The fallback
+    when the org enforces `iam.disableServiceAccountCreation`, which is a
+    common Workspace policy. Identical mechanism to Gmail sending: consent
+    once as an account that already has the folders, and the cron reuses the
+    refresh token. No sharing step needed — the account already sees them.
+
 Every call passes `supportsAllDrives` and `includeItemsFromAllDrives` — the
 invoices live on a shared drive, and without those flags the API silently
 returns an empty list rather than an error, which looks exactly like "no new
@@ -45,24 +57,70 @@ class DriveNotConfigured(RuntimeError):
 _service = None
 
 
+def _build_credentials():
+    """Resolve Drive credentials from whichever mode is configured.
+
+    Service account first when both are present — it is the more robust
+    identity, and a deployment that has deliberately set one up should not
+    silently fall through to a person's token.
+    """
+    mode = settings.drive_auth_mode
+
+    if mode == "service_account":
+        from google.oauth2 import service_account
+
+        try:
+            info = json.loads(settings.google_drive_credentials_json or "")
+        except json.JSONDecodeError as e:
+            raise DriveNotConfigured(
+                "GOOGLE_DRIVE_CREDENTIALS_JSON is not valid JSON. Paste the "
+                f"whole service account key file as one line. ({e})"
+            )
+        return service_account.Credentials.from_service_account_info(
+            info, scopes=SCOPES
+        )
+
+    if mode == "oauth_user":
+        from google.oauth2.credentials import Credentials
+
+        return Credentials(
+            token=None,
+            refresh_token=settings.drive_oauth_refresh_token,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=settings.drive_oauth_client_id,
+            client_secret=settings.drive_oauth_client_secret,
+            scopes=SCOPES,
+        )
+
+    # Neither mode is complete. Say which half is missing rather than just
+    # "not configured" — a half-set credential pair is the common case.
+    raise DriveNotConfigured(
+        "Drive is not configured. Set either GOOGLE_DRIVE_CREDENTIALS_JSON "
+        "(a service account key), or DRIVE_OAUTH_REFRESH_TOKEN together with "
+        "a client id and secret — GOOGLE_OAUTH_CLIENT_ID/SECRET, or the "
+        "GMAIL_OAUTH_ ones, which are reused when the same Desktop OAuth "
+        "client carries both scopes. See docs/SETUP.md §4."
+    )
+
+
 def get_service():
     """Build (and cache) the Drive v3 service."""
     global _service
-    if not settings.google_drive_credentials_json:
-        raise DriveNotConfigured(
-            "GOOGLE_DRIVE_CREDENTIALS_JSON is not set, so Drive polling is "
-            "unavailable."
-        )
     if _service is None:
-        from google.oauth2 import service_account
         from googleapiclient.discovery import build
 
-        info = json.loads(settings.google_drive_credentials_json)
-        creds = service_account.Credentials.from_service_account_info(
-            info, scopes=SCOPES
-        )
+        creds = _build_credentials()
+        log.info("Drive authenticated via %s", settings.drive_auth_mode)
+        # cache_discovery=False: the on-disk cache breaks on Render's
+        # read-only container filesystem.
         _service = build("drive", "v3", credentials=creds, cache_discovery=False)
     return _service
+
+
+def reset_service() -> None:
+    """Drop the cached client. Used by tests, and after a credential change."""
+    global _service
+    _service = None
 
 
 def _escape(value: str) -> str:
