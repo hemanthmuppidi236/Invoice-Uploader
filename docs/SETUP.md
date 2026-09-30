@@ -46,13 +46,24 @@ Migration 003 deliberately ends by raising an exception if the White Cap and
 Cefali default cost codes did not resolve. If you see that error, 002 was not
 applied first — run it, then re-run 003.
 
-Sanity check afterwards:
+**If a migration fails partway through**, run `scripts/reset_schema.sql` to
+drop everything migration 001 creates, then start again from 001. It touches
+only this app's tables, so Supabase's own objects are untouched. Do not run it
+once real invoices exist.
 
-```sql
-select count(*) from cost_codes;          -- 236
-select count(*) from cost_codes where active;  -- 229
-select invoice_name, bt_name from vendors order by invoice_name;
-```
+Sanity check afterwards — paste `scripts/verify_schema.sql` into the SQL
+editor. Every row should read `OK`:
+
+| what | expected |
+|---|---|
+| tables | 12 |
+| cost codes seeded | 236 |
+| cost codes active | 229 |
+| vendors seeded | 6 |
+| White Cap default code | `3015 - Hardware & Misc` |
+| send-once index | 1 |
+| signup trigger | 1 |
+| storage buckets | `invoices, mix-designs` |
 
 ### 1.3 Create the storage buckets
 
@@ -349,3 +360,4 @@ not that the service is down.
 | Email worked, then stopped a week later | The consent screen is External + Testing; refresh tokens expire in 7 days |
 | Every request 403s | Your `app_users` row still has `viewer`; promote it |
 | 500s mentioning RLS | A `NEXT_PUBLIC_*` variable was given the `service_role` key, or the backend was given the `anon` key |
+| `42P17: functions in index expression must be marked IMMUTABLE` | You are on a migration 001 from before 2026-09-30. Pull the latest — `created_at::DATE` on a TIMESTAMPTZ is STABLE and Postgres rejects it in an index. |

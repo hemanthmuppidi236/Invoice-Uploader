@@ -401,8 +401,20 @@ CREATE TABLE email_log (
 CREATE INDEX idx_email_log_kind ON email_log(kind, created_at DESC);
 -- Idempotency guard for the scheduled jobs: one send per kind per recipient
 -- per calendar day, so a double cron fire cannot double-mail anyone.
+--
+-- The day is pinned to UTC explicitly. A bare `created_at::DATE` on a
+-- TIMESTAMPTZ is STABLE, not IMMUTABLE — its result depends on the session's
+-- TimeZone setting — and Postgres refuses a non-immutable expression in an
+-- index. `AT TIME ZONE 'UTC'` fixes the zone as a literal, which makes the
+-- whole expression immutable and the index deterministic.
+--
+-- UTC rather than Pacific is deliberate: both jobs fire well inside a single
+-- UTC day (the 3:30 PM digest at 22:30 UTC, the 5:30 PM summary at 00:30 UTC
+-- the following day), so a retry minutes later always lands on the same UTC
+-- date and is correctly suppressed. Note this means an end-of-day summary is
+-- logged under the UTC day AFTER the Pacific day it describes.
 CREATE UNIQUE INDEX idx_email_log_daily_unique
-    ON email_log(kind, recipient, (created_at::DATE))
+    ON email_log(kind, recipient, ((created_at AT TIME ZONE 'UTC')::DATE))
     WHERE error IS NULL;
 
 
