@@ -1,0 +1,31 @@
+# ─── Secrets. Never commit these. ────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+service-account*.json
+client_secret*.json
+
+# ─── Python ──────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# ─── Node / Next ─────────────────────────────────────────────────────
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+.vercel
+
+# ─── OS and editor ───────────────────────────────────────────────────
+.DS_Store
+.idea/
+*.swp
+
+# ─── Local agent config ──────────────────────────────────────────────
+.claude/settings.local.json

@@ -1,0 +1,80 @@
+-- ╔═══════════════════════════════════════════════════════════════════════╗
+-- ║  User seed TEMPLATE — fill in the real emails, then apply as           ║
+-- ║  migrations/004_seed_users.sql                                         ║
+-- ║                                                                        ║
+-- ║  Why a template: prompt §3 names the people (Linda, Raz, Shant,        ║
+-- ║  Hemanth, the PEs) but the §15 kickoff block never supplied their      ║
+-- ║  email addresses. Only Linda's is known, from SOP §1. Guessing an      ║
+-- ║  address would seed a row that never matches a real Google login.      ║
+-- ║                                                                        ║
+-- ║  Rows seeded here get a placeholder UUID. The auth.users trigger in    ║
+-- ║  migration 001 claims the row by email on first sign-in and re-points  ║
+-- ║  it at the real auth id, keeping the roles granted below. Every FK      ║
+-- ║  onto app_users(id) is ON UPDATE CASCADE so that re-point is safe.     ║
+-- ║                                                                        ║
+-- ║  Roles (prompt §3):                                                    ║
+-- ║    admin       — everything, plus renumber/void/delete and user mgmt   ║
+-- ║    accountant  — assign, reassign, run intake, trigger uploads,        ║
+-- ║                  manage reference data                                 ║
+-- ║    approver    — approve, reject, view all                             ║
+-- ║    pe          — review invoices assigned to them, edit, mark reviewed ║
+-- ║    viewer      — read only (the default for any new signup)            ║
+-- ║                                                                        ║
+-- ║  A person may hold several. Linda is accountant AND approver.          ║
+-- ╚═══════════════════════════════════════════════════════════════════════╝
+
+INSERT INTO app_users (id, email, name, role)
+VALUES
+    -- Linda — accounting. Runs intake, assigns, triages flagged, starts the
+    -- Chrome upload session. Also one of the three approvers.
+    (uuid_generate_v4(), 'linda@ferrocretebuilders.com', 'Linda',
+     ARRAY['accountant', 'approver']::TEXT[]),
+
+    -- Hemanth — admin. Everything, plus void/delete and user management.
+    (uuid_generate_v4(), 'REPLACE-hemanth@ferrocretebuilders.com', 'Hemanth',
+     ARRAY['admin']::TEXT[]),
+
+    -- Raz — approver.
+    (uuid_generate_v4(), 'REPLACE-raz@ferrocretebuilders.com', 'Raz',
+     ARRAY['approver']::TEXT[]),
+
+    -- Shant — approver.
+    (uuid_generate_v4(), 'REPLACE-shant@ferrocretebuilders.com', 'Shant',
+     ARRAY['approver']::TEXT[]),
+
+    -- Project engineers — one row each. These are the default reviewers,
+    -- assigned per project on the onboarding screen. Add as many as needed.
+    (uuid_generate_v4(), 'REPLACE-pe1@ferrocretebuilders.com', 'PE One',
+     ARRAY['pe']::TEXT[]),
+    (uuid_generate_v4(), 'REPLACE-pe2@ferrocretebuilders.com', 'PE Two',
+     ARRAY['pe']::TEXT[])
+ON CONFLICT (email) DO UPDATE SET
+    name = EXCLUDED.name,
+    role = EXCLUDED.role;
+
+
+-- Refuse to apply while placeholders are still in place. Without this guard a
+-- half-filled seed silently creates users nobody can log in as, and the first
+-- symptom is a PE who cannot see their queue.
+DO $$
+DECLARE
+    placeholders INTEGER;
+BEGIN
+    SELECT COUNT(*) INTO placeholders
+      FROM app_users
+     WHERE email LIKE 'REPLACE-%';
+
+    IF placeholders > 0 THEN
+        RAISE EXCEPTION
+            'User seed: % row(s) still carry a REPLACE- placeholder email. '
+            'Fill in the real addresses before applying.', placeholders;
+    END IF;
+END $$;
+
+
+-- ─── Distribution list (prompt §4.4, §9.2) ─────────────────────────────
+-- Recipients of the 5:30 PM end-of-day summary. Also manageable from /admin.
+--
+-- INSERT INTO distribution_list (email, name) VALUES
+--     ('REPLACE-someone@ferrocretebuilders.com', 'Someone')
+-- ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name, active = TRUE;
