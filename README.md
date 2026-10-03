@@ -61,6 +61,10 @@ emails.
 **Phase 3** — the upload queue the Chrome session reads, the `mark-uploaded`
 guard, and the Drive filing that follows it.
 
+**Phase 4** — White Cap combined-file splitting, duplicate detection that
+survives a re-scan, and the metrics page that says whether the AI is earning
+its trust.
+
 Built and working:
 
 - Google OAuth login, domain-restricted, with the backend as the authority on roles
@@ -78,10 +82,13 @@ Built and working:
 - The upload queue: the BuilderTrend field values computed server-side, with blockers separated from warnings, and the §12 guard plus double-save protection on `mark-uploaded`
 - Drive filing: the vendor folder's own naming convention inferred from what is already in it, the original moved to `Uploaded/`, and never a delete or a created folder
 - `/uploads`: the approved queue as a per-invoice form preview, the retry for a failed filing, and the last sessions' results
+- White Cap combined files split into one invoice per page, with the combined original held in the intake folder until every page is filed
+- Duplicate detection that survives a re-scan: near-amount matching, normalised invoice numbers, a date window, and a byte-identical PDF check that outranks all of them
+- `/metrics`: AI acceptance by vendor, cost code, and confidence band — including whether the confidence number predicts anything at all
+- Element keywords editable in `/admin`, which is the fix `/metrics` points at
 
-Not built yet, by design:
-
-- **Phase 4**: White Cap combined-file splitting, duplicate detection hardening, a metrics page
+Still outstanding from §12: Sentry and structured JSON logging. Every 500
+carries an `error_id` that also appears in the Render logs.
 
 ## Getting started
 
@@ -91,7 +98,9 @@ code gets chosen are in **[docs/PHASE_1.md](docs/PHASE_1.md)**. The workflow,
 Gmail setup, and the cron schedules are in
 **[docs/PHASE_2.md](docs/PHASE_2.md)**. The upload and filing half is in
 **[docs/PHASE_3.md](docs/PHASE_3.md)**, and the contract the Chrome session
-itself works from is **[docs/AGENT_API.md](docs/AGENT_API.md)**.
+itself works from is **[docs/AGENT_API.md](docs/AGENT_API.md)**. The White
+Cap splitter, duplicate scoring, and metrics are in
+**[docs/PHASE_4.md](docs/PHASE_4.md)**.
 
 The short version:
 

@@ -221,6 +221,35 @@ def find_duplicate(
     numbers — most start at 1 — so comparing across them would flag
     constantly and teach everyone to ignore the flag.
     """
+    # The identical-PDF check runs FIRST, unscoped and unwindowed.
+    #
+    # Everything below narrows by vendor and by a date window, which are
+    # heuristics: good ones, but heuristics. The hash is proof. Filtering it
+    # through a heuristic means a re-scan dated a year earlier, or one
+    # ingested before its vendor resolved, is missed — and missed is the
+    # expensive direction. Indexed on (vendor_id, pdf_sha256), and the
+    # vendor-less scan is rare enough not to matter.
+    if pdf_sha256:
+        identical = (
+            get_service_client()
+            .table("invoices")
+            .select("id,invoice_no,amount,invoice_date,status,created_at,pdf_sha256")
+            .eq("pdf_sha256", pdf_sha256)
+            .neq("id", invoice_id)
+            .limit(5)
+            .execute()
+            .data
+            or []
+        )
+        live = [r for r in identical if r.get("status") not in SETTLED]
+        if live:
+            live.sort(key=lambda r: str(r.get("created_at") or ""))
+            return DuplicateMatch(
+                invoice=live[0],
+                score=10,
+                reasons=["the PDF is byte-for-byte the same file"],
+            )
+
     if not vendor_id:
         return None
 

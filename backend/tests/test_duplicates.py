@@ -276,3 +276,37 @@ def test_the_description_names_the_other_invoice_and_the_reason(db):
     assert "2,294.25" in text
     assert "Matched because" in text
     assert "mark not a duplicate" in text
+
+
+def test_an_identical_pdf_outranks_the_date_window(db):
+    """The window and the vendor scope are heuristics; the hash is proof.
+    Filtering proof through a heuristic means a re-scan of something from
+    last year, or one ingested before its vendor resolved, is missed — and
+    missed is the expensive direction."""
+    _existing(
+        db,
+        id="inv-ancient",
+        invoice_date="2020-01-01",
+        invoice_no="ILLEGIBLE",
+        amount="1.00",
+        pdf_sha256="deadbeef",
+    )
+    match = _find(pdf_sha256="deadbeef")
+    assert match is not None
+    assert match.invoice["id"] == "inv-ancient"
+
+
+def test_an_identical_pdf_is_found_even_with_no_vendor_resolved(db):
+    """Intake flags unknown-vendor invoices, and the same file arriving twice
+    while the vendor is still unmapped is exactly when a human is least
+    likely to notice."""
+    _existing(db, id="inv-old", vendor_id=None, pdf_sha256="deadbeef")
+    match = _find(vendor_id=None, pdf_sha256="deadbeef")
+    assert match is not None
+
+
+def test_an_identical_pdf_that_was_voided_does_not_match(db):
+    """Voiding is how a real duplicate is resolved. Matching a voided record
+    would make the flag unclearable."""
+    _existing(db, id="inv-void", status="void", pdf_sha256="deadbeef")
+    assert _find(pdf_sha256="deadbeef") is None

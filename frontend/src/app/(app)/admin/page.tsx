@@ -13,6 +13,7 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { api, formatApiError } from "@/lib/api";
 import { ErrorBanner } from "@/components/ErrorBanner";
 import { useCurrentUser } from "@/lib/useCurrentUser";
@@ -162,6 +163,18 @@ function CostCodesPanel({
     }
   }
 
+  async function saveKeywords(c: CostCode, element_keywords: string[]) {
+    setBusy(true);
+    try {
+      await api.patch(`/admin/cost-codes/${c.id}`, { element_keywords });
+      await reload();
+    } catch (e) {
+      onError(formatApiError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="glass section-card">
       <div className="section-header">
@@ -202,6 +215,20 @@ function CostCodesPanel({
         are what the AI matches a mix design&rsquo;s element uses and an
         invoice line&rsquo;s description text against. Inactive codes exist in
         BuilderTrend but must never receive a vendor bill.
+        {canWrite && (
+          <>
+            {" "}
+            Keywords are editable here, and editing them is the fix when{" "}
+            <Link href="/metrics" className="dash-open-link">
+              AI accuracy
+            </Link>{" "}
+            shows a code being suggested and then rejected: the model matches
+            on these words, so a code nobody describes that way will keep
+            losing. The code string itself is not editable — past approvals
+            and mix design rows point at it, and renaming one in place would
+            silently change what an earlier decision meant.
+          </>
+        )}
       </div>
 
       {codes === null && (
@@ -228,8 +255,14 @@ function CostCodesPanel({
                   <tr key={c.id}>
                     <td className="mono">{c.code}</td>
                     <td className="mono">{c.base_code || "—"}</td>
-                    <td>
-                      {c.element_keywords.length > 0 ? (
+                    <td style={{ minWidth: 280 }}>
+                      {canWrite ? (
+                        <KeywordEditor
+                          code={c}
+                          disabled={busy}
+                          onSave={(keywords) => saveKeywords(c, keywords)}
+                        />
+                      ) : c.element_keywords.length > 0 ? (
                         <div className="chip-row">
                           {c.element_keywords.map((k) => (
                             <span key={k} className="chip">
@@ -269,6 +302,62 @@ function CostCodesPanel({
         </div>
       ))}
     </div>
+  );
+}
+
+/**
+ * Element keywords for one cost code, edited as a comma-separated list.
+ *
+ * Comma-separated rather than a chip-with-x widget: these are edited rarely
+ * and in bulk — somebody reading /metrics and adding three synonyms at once —
+ * and a text field is faster for that than three clicks per word. Saves on
+ * blur, matching how every other reference field in the app behaves.
+ */
+function KeywordEditor({
+  code,
+  disabled,
+  onSave,
+}: {
+  code: CostCode;
+  disabled: boolean;
+  onSave: (keywords: string[]) => void;
+}) {
+  const original = code.element_keywords.join(", ");
+  const [value, setValue] = useState(original);
+
+  // Re-sync when the row is reloaded after a save elsewhere, but never while
+  // this field is the one being typed in.
+  useEffect(() => {
+    setValue(original);
+  }, [original]);
+
+  function commit() {
+    const next = value
+      .split(",")
+      .map((k) => k.trim().toLowerCase())
+      .filter(Boolean);
+    // Deduplicated: the AI matches on membership, so a repeated word is
+    // noise, and it makes the list harder to scan.
+    const unique = [...new Set(next)];
+    if (unique.join(", ") === original) return;
+    onSave(unique);
+  }
+
+  return (
+    <input
+      className="cell-select"
+      style={{ width: "100%" }}
+      value={value}
+      disabled={disabled}
+      placeholder="columns, shear wall, SOG — comma separated"
+      onChange={(e) => setValue(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") e.currentTarget.blur();
+        if (e.key === "Escape") setValue(original);
+      }}
+      title="What the AI matches mix design element uses and invoice line descriptions against"
+    />
   );
 }
 
