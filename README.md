@@ -96,7 +96,7 @@ itself works from is **[docs/AGENT_API.md](docs/AGENT_API.md)**.
 The short version:
 
 ```bash
-# 1. Create a Supabase project, then run migrations/001 through 004 in order
+# 1. Create a Supabase project, then run migrations/001 through 005 in order
 #    in the SQL editor. Create the `invoices` and `mix-designs` Storage
 #    buckets and keep both private.
 

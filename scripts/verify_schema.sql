@@ -1,4 +1,4 @@
--- Read-only check that migrations 001 through 004 all landed.
+-- Read-only check that migrations 001 through 005 all landed.
 -- Run after applying them. Every row should say OK.
 
 SELECT 'tables'         AS what,
@@ -64,6 +64,16 @@ SELECT 'bt bill id unique', count(*)::text, '1',
        CASE WHEN count(*) = 1 THEN 'OK' ELSE 'RUN 004' END
   FROM pg_indexes
  WHERE schemaname = 'public' AND indexname = 'idx_invoices_bt_bill_id'
+
+UNION ALL
+-- Migration 005. Without it the duplicate check cannot recognise the same
+-- PDF arriving twice, which is its only signal that is proof rather than
+-- evidence.
+SELECT 'pdf hash column', count(*)::text, '1',
+       CASE WHEN count(*) = 1 THEN 'OK' ELSE 'RUN 005' END
+  FROM information_schema.columns
+ WHERE table_schema = 'public' AND table_name = 'invoices'
+   AND column_name = 'pdf_sha256'
 
 UNION ALL
 SELECT 'storage buckets',

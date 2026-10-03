@@ -46,6 +46,7 @@ output of each before running the next.
 | `migrations/002_seed_cost_codes.sql` | 236 BuilderTrend cost codes |
 | `migrations/003_seed_vendors.sql` | The SOP §6 vendor name mapping |
 | `migrations/004_phase3_filing.sql` | Filing columns, and the unique index that stops one BuilderTrend bill being recorded against two invoices |
+| `migrations/005_duplicate_hardening.sql` | The PDF hash column the duplicate check uses |
 
 Migration 003 deliberately ends by raising an exception if the White Cap and
 Cefali default cost codes did not resolve. If you see that error, 002 was not

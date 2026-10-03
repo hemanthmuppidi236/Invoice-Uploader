@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
 
-from . import audit, drive, pdf_split, storage
+from . import audit, drive, duplicates, pdf_split, storage
 from .auth import Actor
 from .claude_client import ClaudeNotConfigured, ClaudeOutputInvalid
 from .config import settings
@@ -54,6 +54,20 @@ from .supabase_client import get_service_client
 log = logging.getLogger(__name__)
 
 SYSTEM_ACTOR = Actor(is_agent=True)
+
+
+def _sha256(data: bytes) -> str:
+    """Identity of a PDF, independent of how it arrived.
+
+    Stored on every intake path so the same document is recognised whether it
+    came off the Drive poll, out of a combined file, or as an email
+    attachment somebody uploaded. It is the one duplicate signal that is
+    proof rather than evidence — it still holds when every extracted field
+    came out different because the second scan was worse.
+    """
+    import hashlib
+
+    return hashlib.sha256(data).hexdigest()
 
 
 @dataclass
@@ -127,62 +141,6 @@ def flag_invoice(
 
 
 # ─── Duplicate detection (prompt §7.2) ────────────────────────────────
-
-
-def find_duplicate(
-    *,
-    invoice_id: str,
-    vendor_id: Optional[str],
-    invoice_no: Optional[str],
-    amount: Optional[Decimal],
-    invoice_date,
-) -> Optional[dict]:
-    """An existing invoice that looks like this one, or None.
-
-    Two tests, per §7.2: same vendor and invoice number, or same vendor,
-    amount, and date. The second catches a re-scan where the invoice number
-    was read differently, which is the case a unique constraint misses.
-
-    Voided records are excluded — voiding is how a real duplicate gets
-    resolved, so matching against them would make the flag permanent.
-    """
-    if not vendor_id:
-        return None
-
-    base_fields = "id,invoice_no,amount,invoice_date,status,created_at"
-
-    if invoice_no:
-        hit = (
-            _sb()
-            .table("invoices")
-            .select(base_fields)
-            .eq("vendor_id", vendor_id)
-            .eq("invoice_no", invoice_no)
-            .neq("id", invoice_id)
-            .neq("status", "void")
-            .limit(1)
-            .execute()
-        )
-        if hit.data:
-            return hit.data[0]
-
-    if amount is not None and invoice_date:
-        hit = (
-            _sb()
-            .table("invoices")
-            .select(base_fields)
-            .eq("vendor_id", vendor_id)
-            .eq("amount", str(amount))
-            .eq("invoice_date", str(invoice_date))
-            .neq("id", invoice_id)
-            .neq("status", "void")
-            .limit(1)
-            .execute()
-        )
-        if hit.data:
-            return hit.data[0]
-
-    return None
 
 
 # ─── Suggestion (prompt §7.2) ─────────────────────────────────────────
@@ -397,25 +355,21 @@ def _persist_extraction(
         )
         return "flagged"
 
-    duplicate = find_duplicate(
+    duplicate = duplicates.find_duplicate(
         invoice_id=invoice_id,
         vendor_id=vendor["id"] if vendor else None,
         invoice_no=invoice_no,
         amount=amount,
         invoice_date=invoice_date,
+        pdf_sha256=row.get("pdf_sha256"),
     )
     if duplicate:
         flag_invoice(
             invoice_id,
             code="possible_duplicate",
-            detail=(
-                f"Looks like invoice {duplicate.get('invoice_no') or '(no number)'} "
-                f"already recorded on {str(duplicate.get('invoice_date'))[:10]} "
-                f"for {duplicate.get('amount')} — status {duplicate.get('status')}. "
-                "Mark not a duplicate if these are genuinely different bills."
-            ),
+            detail=duplicates.describe(duplicate),
             actor=actor,
-            duplicate_of=duplicate["id"],
+            duplicate_of=duplicate.invoice["id"],
             current_status=from_status,
         )
         return "flagged"
@@ -715,9 +669,9 @@ def _process_file(entry: dict, *, source_label: str, actor: Actor) -> dict:
         )
         return {"outcome": "flagged", "invoice_id": invoice_id, "detail": str(e)}
 
-    _sb().table("invoices").update({"pdf_storage_path": path}).eq(
-        "id", invoice_id
-    ).execute()
+    _sb().table("invoices").update(
+        {"pdf_storage_path": path, "pdf_sha256": _sha256(pdf_bytes)}
+    ).eq("id", invoice_id).execute()
 
     # A file straight out of the White Cap root is a combined multi-job PDF
     # (SOP §5: one page is one invoice). Reading it as a single document
@@ -881,9 +835,11 @@ def _process_page(
 
     path = storage.make_invoice_pdf_path(invoice_id)
     storage.upload_bytes(storage.INVOICES, path, page_bytes)
-    _sb().table("invoices").update({"pdf_storage_path": path}).eq(
-        "id", invoice_id
-    ).execute()
+    # Hashed per page, not per bundle: each page is its own invoice, and the
+    # bundle's hash would make all twelve look like duplicates of each other.
+    _sb().table("invoices").update(
+        {"pdf_storage_path": path, "pdf_sha256": _sha256(page_bytes)}
+    ).eq("id", invoice_id).execute()
 
     # SOP §5: "Skip yard invoices — don't enter them." Checked before the
     # Claude call when the page has a text layer, because a yard page costs
@@ -933,9 +889,7 @@ def ingest_upload(
     creating a second payable, which is the property that matters — a double
     payment does not announce itself as an error.
     """
-    import hashlib
-
-    digest = hashlib.sha256(pdf_bytes).hexdigest()
+    digest = _sha256(pdf_bytes)
     source_id = f"{UPLOAD_SOURCE_PREFIX}{digest}"
 
     existing = (
@@ -1026,9 +980,9 @@ def ingest_upload(
         )
         return {"outcome": "flagged", "invoice_id": invoice_id, "detail": str(e)}
 
-    _sb().table("invoices").update({"pdf_storage_path": path}).eq(
-        "id", invoice_id
-    ).execute()
+    _sb().table("invoices").update(
+        {"pdf_storage_path": path, "pdf_sha256": digest}
+    ).eq("id", invoice_id).execute()
 
     # No Claude key is a legitimate configuration, not a failure: the invoice
     # is stored and visible, and `retry-suggestion` picks it up once the key
