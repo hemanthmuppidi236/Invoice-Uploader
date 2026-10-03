@@ -20,7 +20,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from .api import admin, invoices, jobs, me, projects
+from .api import admin, invoices, jobs, me, metrics, projects
 from .core.config import settings
 
 logging.basicConfig(level=settings.log_level)
@@ -147,6 +147,7 @@ app.include_router(projects.router)
 app.include_router(invoices.router)
 app.include_router(jobs.router)
 app.include_router(admin.router)
+app.include_router(metrics.router)
 
 # Still to come, and deliberately absent rather than stubbed — a route that
 # returns 501 still looks live to the Chrome session, and nothing should look

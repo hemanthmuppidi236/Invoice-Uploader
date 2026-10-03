@@ -536,3 +536,30 @@ class UploadResultOut(BaseModel):
     created: bool = True
     detail: Optional[str] = None
     invoice: InvoiceDetail
+
+
+# ─── Metrics (prompt §12) ─────────────────────────────────────────────
+
+
+class MetricsBucket(BaseModel):
+    key: str
+    label: str
+    total: int = 0
+    accepted: int = 0
+    # None, not 0.0, when there is nothing to judge — a vendor with no
+    # approved invoices has no accuracy, and 0% would read as the model
+    # failing rather than as no data.
+    rate: Optional[float] = None
+
+
+class MetricsOut(BaseModel):
+    generated_at: datetime
+    window_days: int
+    judged: int = 0
+    accepted: int = 0
+    rate: Optional[float] = None
+    by_vendor: list[MetricsBucket] = []
+    by_cost_code: list[MetricsBucket] = []
+    by_confidence: list[MetricsBucket] = []
+    unsuggested: int = 0
+    notes: list[str] = []

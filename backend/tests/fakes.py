@@ -21,6 +21,8 @@ class FakeQuery:
         self.op = op
         self.payload = payload
         self.filters: list[tuple[str, str, object]] = []
+        self._order: tuple[str, bool] | None = None
+        self._limit: int | None = None
 
     # Filter builders — each returns self so the chain keeps going.
     def eq(self, col, val):
@@ -69,10 +71,20 @@ class FakeQuery:
         """PostgREST's `.not_.is_(col, "null")` — negates the next filter."""
         return _Negated(self)
 
-    def limit(self, _n):
+    def limit(self, n):
+        self._limit = n
         return self
 
-    def order(self, *_a, **_k):
+    def order(self, column, desc=False, **_k):
+        """Real ordering, because callers depend on it for correctness.
+
+        `_latest_suggestion_per_invoice` takes the first row per invoice and
+        calls it the newest — which is only true if the rows came back
+        ordered. A no-op here would let that pass while returning whichever
+        row happened to be inserted first, and the test would be measuring
+        nothing.
+        """
+        self._order = (column, desc)
         return self
 
     def select(self, *_a):
@@ -116,7 +128,17 @@ class FakeQuery:
         raise AssertionError(f"unsupported op {self.op}")
 
     def _matching(self):
-        return [r for r in self.table.rows if self._match(r)]
+        rows = [r for r in self.table.rows if self._match(r)]
+        if self._order:
+            column, desc = self._order
+            # NULLs sort last ascending, same as Postgres' default.
+            rows.sort(
+                key=lambda r: (r.get(column) is None, str(r.get(column) or "")),
+                reverse=desc,
+            )
+        if self._limit is not None:
+            rows = rows[: self._limit]
+        return rows
 
     def _match(self, row):
         for kind, col, val in self.filters:

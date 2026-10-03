@@ -19,6 +19,7 @@ const NAV = [
   { href: "/flagged", label: "Flagged", roles: null },
   { href: "/projects", label: "Projects", roles: null },
   { href: "/uploads", label: "Uploads", roles: ["admin", "accountant"] },
+  { href: "/metrics", label: "Metrics", roles: ["admin", "accountant"] },
   { href: "/admin", label: "Admin", roles: ["admin", "accountant"] },
 ] as const;
 
@@ -97,6 +98,8 @@ export function Topbar({
     crumbs = <span className="breadcrumb-active">Flagged</span>;
   } else if (root === "uploads") {
     crumbs = <span className="breadcrumb-active">Uploads</span>;
+  } else if (root === "metrics") {
+    crumbs = <span className="breadcrumb-active">AI accuracy</span>;
   } else if (root === "admin") {
     crumbs = <span className="breadcrumb-active">Reference data</span>;
   } else if (root === "projects") {

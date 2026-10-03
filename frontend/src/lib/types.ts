@@ -765,3 +765,28 @@ export interface UploadResult {
   detail: string | null;
   invoice: InvoiceDetail;
 }
+
+// ─── AI accuracy (Phase 4, prompt §12) ────────────────────────────────
+
+export interface MetricsBucket {
+  key: string;
+  label: string;
+  total: number;
+  accepted: number;
+  /** null, not 0, when there is nothing to judge — 0% would read as the
+   *  model failing rather than as no data. */
+  rate: number | null;
+}
+
+export interface Metrics {
+  generated_at: ISODateTime;
+  window_days: number;
+  judged: number;
+  accepted: number;
+  rate: number | null;
+  by_vendor: MetricsBucket[];
+  by_cost_code: MetricsBucket[];
+  by_confidence: MetricsBucket[];
+  unsuggested: number;
+  notes: string[];
+}
