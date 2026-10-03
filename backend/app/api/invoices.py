@@ -17,7 +17,16 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status as http
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+    status as http,
+)
 
 from ..core import audit, filing, intake, state_machine, storage
 from ..core.auth import (
@@ -29,6 +38,7 @@ from ..core.auth import (
     require_agent_or_role,
     require_role,
 )
+from ..core.claude_client import MAX_PDF_BYTES
 from ..core.config import settings
 from ..core.invoice_rules import (
     bill_no_for,
@@ -64,6 +74,7 @@ from ..schemas.invoices import (
     UploadQueueCost,
     UploadQueueItem,
     UploadQueueOut,
+    UploadResultOut,
     VoidIn,
 )
 
@@ -393,6 +404,90 @@ def _decorate(rows: list[dict], lookups: dict) -> list[InvoiceOut]:
         )
         for r in rows
     ]
+
+
+# ─── Manual upload (prompt §7.1, the non-Drive path) ──────────────────
+
+
+@router.post(
+    "/upload", response_model=UploadResultOut, status_code=http.HTTP_201_CREATED
+)
+async def upload_invoice(
+    file: UploadFile = File(...),
+    note: Optional[str] = Form(default=None),
+    actor: Actor = Depends(as_actor),
+    user: CurrentUser = Depends(require_role("admin", "accountant")),
+):
+    """Add an invoice by handing the app its PDF.
+
+    The Drive poll is the normal way in and stays the normal way in. This is
+    for the invoice that arrived as an email attachment, the re-scan of
+    something that flagged as unreadable, and the first invoice on a
+    deployment that has no Drive credentials yet.
+
+    Accounting only. A project engineer reviews what they are given; letting
+    anyone add a payable would put a second, unaudited door into the ledger.
+
+    Everything after the PDF lands in Storage is the Drive pipeline exactly —
+    same extraction, same flag reasons, same states. Re-uploading the same
+    file returns the invoice that already exists rather than creating a
+    second payable, keyed on a hash of the bytes, because for an upload the
+    bytes are the only identity there is.
+    """
+    filename = file.filename or "invoice.pdf"
+    if not filename.lower().endswith(".pdf"):
+        raise HTTPException(
+            status_code=422,
+            detail="Invoices have to be PDFs. Scan or print to PDF first.",
+        )
+
+    pdf_bytes = await file.read()
+    if not pdf_bytes:
+        raise HTTPException(status_code=422, detail="That file is empty.")
+
+    # Checked before anything is stored, so an oversized PDF cannot leave an
+    # orphan in the bucket and an invoice row the AI can never read.
+    if len(pdf_bytes) > MAX_PDF_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"That PDF is {len(pdf_bytes) / 1_048_576:.1f} MB; the limit "
+                f"is {MAX_PDF_BYTES / 1_048_576:.0f} MB, because the Claude "
+                "API caps a request at 32 MB and base64 inflates it by a "
+                "third. Downsample the scan or split it."
+            ),
+        )
+
+    # Trust the bytes, not the extension. A .pdf that is really a JPEG costs
+    # a Claude call and comes back as an unreadable flag with no useful
+    # reason attached.
+    if not pdf_bytes.startswith(b"%PDF"):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "That file is named .pdf but is not a PDF — it has no PDF "
+                "header. Re-export it from whatever produced it."
+            ),
+        )
+
+    try:
+        outcome = intake.ingest_upload(
+            filename=filename, pdf_bytes=pdf_bytes, actor=actor, note=note
+        )
+    except Exception as e:
+        log.exception("manual invoice upload failed")
+        raise HTTPException(
+            status_code=502, detail=f"Could not ingest the PDF: {e}"
+        )
+
+    detail = _detail(outcome["invoice_id"])
+    return UploadResultOut(
+        invoice_id=outcome["invoice_id"],
+        status=detail.status,
+        created=outcome["outcome"] != "existing",
+        detail=outcome.get("detail") or None,
+        invoice=detail,
+    )
 
 
 # ─── Upload queue (prompt §7.6 step 1, §11) ───────────────────────────

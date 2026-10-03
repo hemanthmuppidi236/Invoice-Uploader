@@ -40,6 +40,7 @@ from .invoice_extractor import (
     resolve_vendor,
 )
 from .invoice_rules import (
+    UPLOAD_SOURCE_PREFIX,
     allocate_proportionally,
     bill_no_for,
     costs_balance,
@@ -727,6 +728,154 @@ def _process_file(entry: dict, *, source_label: str, actor: Actor) -> dict:
             "outcome": "flagged",
             "invoice_id": invoice_id,
             "detail": "Combined White Cap file, needs splitting.",
+        }
+
+    status = apply_extraction(invoice_id, actor=actor)
+    return {"outcome": status, "invoice_id": invoice_id, "detail": ""}
+
+
+# ─── Manual upload (prompt §7.1, the non-Drive path) ──────────────────
+
+
+def ingest_upload(
+    *,
+    filename: str,
+    pdf_bytes: bytes,
+    actor: Actor,
+    note: Optional[str] = None,
+) -> dict:
+    """Ingest a PDF handed straight to the app, then run the same pipeline.
+
+    The Drive poll is the normal way in. This is the other one: an invoice
+    that arrived by email, a re-scan of something unreadable, or a first
+    invoice before Drive credentials exist. Everything after the PDF lands in
+    Storage is identical — same extraction, same flag reasons, same states —
+    because a manually added invoice that behaved differently downstream
+    would be a second workflow to reason about.
+
+    **Idempotency comes from the bytes.** The Drive path keys on the file id;
+    an upload has no file id, so the identity is a SHA-256 of the content.
+    Dropping the same PDF in twice returns the first invoice rather than
+    creating a second payable, which is the property that matters — a double
+    payment does not announce itself as an error.
+    """
+    import hashlib
+
+    digest = hashlib.sha256(pdf_bytes).hexdigest()
+    source_id = f"{UPLOAD_SOURCE_PREFIX}{digest}"
+
+    existing = (
+        _sb()
+        .table("invoices")
+        .select("id,status")
+        .eq("source_file_id", source_id)
+        .eq("source_page", 1)
+        .limit(1)
+        .execute()
+    )
+    if existing.data:
+        return {
+            "outcome": "existing",
+            "invoice_id": existing.data[0]["id"],
+            "detail": (
+                "This exact PDF was already uploaded; its invoice is "
+                f"{existing.data[0]['status']}. Nothing was created."
+            ),
+        }
+
+    # Claimed before the Storage write and the Claude call, same as the poll.
+    # Two people uploading the same attachment at the same moment is the race
+    # this closes; the unique index decides it and the loser reads back the
+    # winner's row rather than failing.
+    try:
+        created = (
+            _sb()
+            .table("invoices")
+            .insert(
+                {
+                    "source_file_id": source_id,
+                    "source_page": 1,
+                    "source_filename": filename,
+                    "source_path": f"Uploaded by hand/{filename}",
+                    "status": "ingested",
+                }
+            )
+            .execute()
+        )
+    except Exception as e:
+        if "23505" in str(e) or "duplicate key" in str(e).lower():
+            again = (
+                _sb()
+                .table("invoices")
+                .select("id,status")
+                .eq("source_file_id", source_id)
+                .eq("source_page", 1)
+                .limit(1)
+                .execute()
+            )
+            if again.data:
+                return {
+                    "outcome": "existing",
+                    "invoice_id": again.data[0]["id"],
+                    "detail": "Someone uploaded this same PDF a moment ago.",
+                }
+        raise
+
+    if not created.data:
+        raise RuntimeError("invoice insert returned no row")
+    invoice_id = created.data[0]["id"]
+
+    audit.log_transition(
+        invoice_id=invoice_id,
+        action="ingested",
+        from_status="none",
+        to_status="ingested",
+        actor=actor,
+        diff={
+            "source": "manual upload",
+            "source_filename": filename,
+            "sha256": digest,
+            "note": note,
+        },
+    )
+
+    path = storage.make_invoice_pdf_path(invoice_id)
+    try:
+        storage.upload_bytes(storage.INVOICES, path, pdf_bytes)
+    except Exception as e:
+        flag_invoice(
+            invoice_id,
+            code="unreadable",
+            detail=f"Could not store the PDF: {e}",
+            actor=actor,
+            current_status="ingested",
+        )
+        return {"outcome": "flagged", "invoice_id": invoice_id, "detail": str(e)}
+
+    _sb().table("invoices").update({"pdf_storage_path": path}).eq(
+        "id", invoice_id
+    ).execute()
+
+    # No Claude key is a legitimate configuration, not a failure: the invoice
+    # is stored and visible, and `retry-suggestion` picks it up once the key
+    # is set. Flagging says so rather than leaving it stuck in `ingested`
+    # with nothing explaining why.
+    if not settings.claude_enabled:
+        flag_invoice(
+            invoice_id,
+            code="ai_error",
+            detail=(
+                "Uploaded, but ANTHROPIC_API_KEY is not configured so the AI "
+                "could not read it. Set the key, then re-run the AI on this "
+                "invoice."
+            ),
+            actor=actor,
+            current_status="ingested",
+        )
+        return {
+            "outcome": "flagged",
+            "invoice_id": invoice_id,
+            "detail": "Stored. The AI is not configured.",
         }
 
     status = apply_extraction(invoice_id, actor=actor)

@@ -33,6 +33,7 @@ from typing import Optional
 
 from . import audit, drive, storage
 from .config import settings
+from .invoice_rules import is_uploaded_source
 from .supabase_client import get_service_client
 
 log = logging.getLogger(__name__)
@@ -289,7 +290,16 @@ def file_invoice(
     # Deliberately after the copy, and non-fatal. If this fails the invoice is
     # still filed; re-running the whole thing would put a second copy in the
     # vendor folder, which is worse than an original left in place.
-    if archive and invoice.get("source_file_id"):
+    if is_uploaded_source(invoice.get("source_file_id")):
+        # Nothing to archive: this invoice was handed to the app directly, so
+        # there is no Drive original sitting in an intake folder. Said out
+        # loud rather than left silent, because `original_archived: false`
+        # otherwise reads as a failure on the /uploads screen.
+        result.warnings.append(
+            "This invoice was uploaded by hand, so there is no Drive "
+            "original to archive. The filed copy is in place."
+        )
+    elif archive and invoice.get("source_file_id"):
         try:
             archive_folder = _find_archive_folder(invoice)
             if archive_folder:

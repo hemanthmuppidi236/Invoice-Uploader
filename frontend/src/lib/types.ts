@@ -749,3 +749,19 @@ export interface MarkUploadedResult {
  */
 export const CHROME_SESSION_PROMPT =
   "Using the saved BuilderTrend invoice upload process, upload the approved invoices from the review app.";
+
+/**
+ * The result of handing the app an invoice PDF directly (§7.1, non-Drive).
+ *
+ * `created` is false when that exact PDF was already in the system — keyed on
+ * a hash of the bytes, so a renamed re-send is still recognised. That is a
+ * success, but it has to read differently from a new invoice, or a
+ * double-click looks like two payables.
+ */
+export interface UploadResult {
+  invoice_id: UUID;
+  status: InvoiceStatus;
+  created: boolean;
+  detail: string | null;
+  invoice: InvoiceDetail;
+}

@@ -8,7 +8,7 @@
  * screen needs to know whether it is theirs before anything else.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { api, formatApiError } from "@/lib/api";
 import { ErrorBanner } from "@/components/ErrorBanner";
@@ -30,6 +30,7 @@ import {
   type InvoiceDashboard,
   type InvoiceStatus,
   type PollResult,
+  type UploadResult,
   type Project,
   type Vendor,
 } from "@/lib/types";
@@ -58,6 +59,8 @@ export default function InvoicesPage() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [polling, setPolling] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const fileInput = useRef<HTMLInputElement | null>(null);
 
   const [status, setStatus] = useState<StatusFilter>("open");
   const [projectId, setProjectId] = useState("");
@@ -96,6 +99,39 @@ export default function InvoicesPage() {
       })
       .catch((e) => setError(formatApiError(e)));
   }, []);
+
+  async function uploadInvoice(file: File) {
+    setUploading(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const body = new FormData();
+      body.append("file", file);
+      const result = await api.post<UploadResult>("/invoices/upload", undefined, {
+        formData: body,
+      });
+      // "Already here" is a success, not an error — but it has to read
+      // differently, or a double-click looks like two invoices.
+      setNotice(
+        result.created
+          ? `Uploaded ${file.name}. ${
+              result.status === "flagged"
+                ? "It needs a look — see Flagged."
+                : "The AI has coded it; it is in the queue."
+            }`
+          : result.detail ||
+              "That exact PDF was already uploaded; nothing was created."
+      );
+      await load();
+    } catch (e) {
+      setError(formatApiError(e));
+    } finally {
+      setUploading(false);
+      // Cleared so the same file can be picked again after a failure —
+      // the change event does not fire twice for one value.
+      if (fileInput.current) fileInput.current.value = "";
+    }
+  }
 
   const filtered = useMemo(() => {
     const rows = data?.invoices ?? [];
@@ -198,6 +234,27 @@ export default function InvoicesPage() {
         </div>
         {canRunIntake && (
           <div className="page-actions">
+            {/* Drive polling is the normal way in; this is the other one —
+                the emailed attachment, the re-scan, the first invoice on a
+                deployment with no Drive credentials yet. */}
+            <input
+              ref={fileInput}
+              type="file"
+              accept="application/pdf,.pdf"
+              style={{ display: "none" }}
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) uploadInvoice(file);
+              }}
+            />
+            <button
+              className="btn"
+              disabled={uploading}
+              onClick={() => fileInput.current?.click()}
+              title="Add an invoice PDF directly, without waiting for the Drive poll"
+            >
+              {uploading ? "Reading the PDF…" : "Upload a PDF"}
+            </button>
             <button className="btn" disabled={polling} onClick={runIntake}>
               {polling ? "Scanning Drive…" : "Run intake now"}
             </button>

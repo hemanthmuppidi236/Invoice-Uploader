@@ -517,3 +517,22 @@ class MarkUploadedOut(BaseModel):
     # bill id. The session uses it to tell "I already did this" apart from
     # "I just did this", so a retried batch does not double-count.
     already_recorded: bool = False
+
+
+# ─── Manual upload (prompt §7.1, the non-Drive path) ──────────────────
+
+
+class UploadResultOut(BaseModel):
+    """What one hand-uploaded PDF became.
+
+    `created` is false when the same PDF was already in the system. That is a
+    success, not an error — but the caller has to be able to tell "I just
+    added this" from "this was already here", or a double-click reads as two
+    invoices.
+    """
+
+    invoice_id: str
+    status: str
+    created: bool = True
+    detail: Optional[str] = None
+    invoice: InvoiceDetail

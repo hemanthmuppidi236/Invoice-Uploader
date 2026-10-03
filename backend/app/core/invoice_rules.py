@@ -29,6 +29,21 @@ YARD_MARKERS = (
 # SOP §6: never select a BuilderTrend vendor record with this marker.
 DO_NOT_SELECT = "do not select"
 
+# `invoices.source_file_id` holds a Drive file id for anything the poll found.
+# An invoice handed straight to the app has no Drive file, so it carries a
+# synthetic id with this prefix instead. Two things read it: filing, which
+# must not try to archive a Drive original that does not exist, and the
+# invoice screens, which say where a record came from. The id after the
+# prefix is a SHA-256 of the PDF bytes — for an upload the bytes ARE the
+# identity, which is what keeps re-dropping the same file from creating a
+# second payable.
+UPLOAD_SOURCE_PREFIX = "upload:"
+
+
+def is_uploaded_source(source_file_id: Optional[str]) -> bool:
+    """Did this invoice arrive by hand rather than from the Drive poll?"""
+    return bool(source_file_id and source_file_id.startswith(UPLOAD_SOURCE_PREFIX))
+
 
 # ─── Due date (SOP §4) ────────────────────────────────────────────────
 

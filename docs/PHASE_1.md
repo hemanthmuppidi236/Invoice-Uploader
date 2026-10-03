@@ -145,12 +145,18 @@ who waits, and the oldest invoice is the most overdue vendor.
 
 ## 5. Running the gate
 
-**Drive is required for this gate.** There is no route that creates an
-invoice — `poll_drive` is the only thing that inserts one, deliberately, so
-that every invoice carries a `source_file_id` and the idempotency index has
-something to key on. Everything downstream (review, approval, upload) can be
-exercised on an invoice once it exists, but getting the first one in means
-Drive credentials.
+Two ways to get an invoice in. **`POST /invoices/upload`** (the **Upload a
+PDF** button on `/invoices`, accounting only) hands the app a PDF directly —
+for an emailed attachment, a re-scan of something that flagged as unreadable,
+or a first invoice on a deployment with no Drive credentials yet. The Drive
+poll is still the normal path and the one this gate is about.
+
+Everything after the PDF reaches Storage is identical either way: same
+extraction, same flag reasons, same states. The only difference is where
+idempotency comes from. The poll keys on the Drive file id; an upload has no
+file id, so it keys on a SHA-256 of the bytes — re-sending the same invoice
+under a different filename is recognised, because for an upload the content
+is the only identity there is.
 
 1. Confirm `GET /health` shows `"claude": true` and `"drive": true`.
 2. Onboard A Street Flats with its CMD-01 submittal (Phase 0), so mix
