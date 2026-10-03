@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
 
-from . import audit, drive, storage
+from . import audit, drive, pdf_split, storage
 from .auth import Actor
 from .claude_client import ClaudeNotConfigured, ClaudeOutputInvalid
 from .config import settings
@@ -188,12 +188,22 @@ def find_duplicate(
 # ─── Suggestion (prompt §7.2) ─────────────────────────────────────────
 
 
-def apply_extraction(invoice_id: str, *, actor: Actor = SYSTEM_ACTOR) -> str:
+def apply_extraction(
+    invoice_id: str,
+    *,
+    actor: Actor = SYSTEM_ACTOR,
+    project_hint: Optional[str] = None,
+) -> str:
     """Run the AI over a stored invoice and land it in `suggested` or `flagged`.
 
     Returns the resulting status. Used by intake and by the `retry-suggestion`
     endpoint, so a flagged invoice Linda has corrected re-runs through exactly
     the same path rather than a second implementation.
+
+    `project_hint` carries something the caller already knows about the job —
+    the CUSTOMER JOB NO. line off a split White Cap page (SOP §5). It is a
+    hint and nothing more: `resolve_project` still has to match it against a
+    real project, and an unmatched job flags rather than guesses.
     """
     invoice = (
         _sb().table("invoices").select("*").eq("id", invoice_id).limit(1).execute()
@@ -228,8 +238,8 @@ def apply_extraction(invoice_id: str, *, actor: Actor = SYSTEM_ACTOR) -> str:
         return "flagged"
 
     # A project or vendor a person already set on a flagged record is passed
-    # in as a hint, so a retry benefits from the correction.
-    project_hint = None
+    # in as a hint, so a retry benefits from the correction. A project set by
+    # hand outranks whatever the caller read off the page.
     if row.get("project_id"):
         proj = (
             _sb()
@@ -709,29 +719,193 @@ def _process_file(entry: dict, *, source_label: str, actor: Actor) -> dict:
         "id", invoice_id
     ).execute()
 
-    # A file straight out of the White Cap root is a combined multi-job PDF.
-    # The splitter is Phase 4; until then, flag rather than let the extractor
-    # read a 12-page bundle as one invoice and produce a confident wrong total.
+    # A file straight out of the White Cap root is a combined multi-job PDF
+    # (SOP §5: one page is one invoice). Reading it as a single document
+    # produces one confident five-figure total on one wrong job, so it is
+    # split before anything reads it.
     if source_label == "White Cap" and not entry.get("parent_folder_name"):
+        pages = 1
+        try:
+            pages = pdf_split.page_count(pdf_bytes)
+        except pdf_split.PdfSplitError as e:
+            flag_invoice(
+                invoice_id,
+                code="unreadable",
+                detail=str(e),
+                actor=actor,
+                current_status="ingested",
+            )
+            return {
+                "outcome": "flagged",
+                "invoice_id": invoice_id,
+                "detail": str(e),
+            }
+        if pages > 1:
+            return _split_combined_file(
+                invoice_id,
+                pdf_bytes=pdf_bytes,
+                entry=entry,
+                actor=actor,
+            )
+        # A one-page White Cap file is just an invoice. Routing it through
+        # the splitter would add a layer to debug through for no gain.
+
+    status = apply_extraction(invoice_id, actor=actor)
+    return {"outcome": status, "invoice_id": invoice_id, "detail": ""}
+
+
+def _split_combined_file(
+    first_invoice_id: str, *, pdf_bytes: bytes, entry: dict, actor: Actor
+) -> dict:
+    """Turn one combined PDF into one invoice per page (SOP §5).
+
+    The row claimed in `_process_file` becomes page 1, so nothing is orphaned
+    if this fails partway: the file is already recorded as seen, and the
+    sibling rows carry the same `source_file_id` with their own
+    `source_page`. That pair is the uniqueness key from migration 001, which
+    existed for exactly this — re-polling a combined file re-finds every page
+    rather than duplicating any of them.
+
+    Each page is then an ordinary invoice. Yard pages flag and are never
+    entered (SOP §5), credit memos keep their negative amount, and the cost
+    code falls to White Cap's default 3015 through the normal §8.4 path.
+    There is no White-Cap-specific extraction, deliberately: a second
+    extraction path would be a second set of rules to keep correct.
+    """
+    file_id = entry["id"]
+    filename = entry.get("name") or "invoice.pdf"
+
+    try:
+        pages = pdf_split.split_pages(pdf_bytes)
+    except pdf_split.PdfSplitError as e:
+        flag_invoice(
+            first_invoice_id,
+            code="unreadable",
+            detail=str(e),
+            actor=actor,
+            current_status="ingested",
+        )
+        return {"outcome": "flagged", "invoice_id": first_invoice_id, "detail": str(e)}
+
+    log.info("splitting %s into %d pages", filename, len(pages))
+    outcomes: list[str] = []
+
+    for index, page_bytes in enumerate(pages, start=1):
+        try:
+            outcome = _process_page(
+                page_bytes,
+                file_id=file_id,
+                page_no=index,
+                filename=filename,
+                total_pages=len(pages),
+                existing_invoice_id=first_invoice_id if index == 1 else None,
+                actor=actor,
+            )
+        except Exception as e:  # noqa: BLE001
+            # One bad page must not abandon the other eleven. Each page is a
+            # separate payable; losing the rest because page 4 failed would
+            # be the expensive mistake.
+            log.exception("page %d of %s failed", index, filename)
+            outcomes.append("error")
+            continue
+        outcomes.append(outcome)
+
+    flagged = sum(1 for o in outcomes if o == "flagged")
+    suggested = sum(1 for o in outcomes if o == "suggested")
+    return {
+        "outcome": "split",
+        "invoice_id": first_invoice_id,
+        "pages": len(pages),
+        "detail": (
+            f"Combined file split into {len(pages)} invoices: "
+            f"{suggested} coded, {flagged} flagged."
+        ),
+    }
+
+
+def _process_page(
+    page_bytes: bytes,
+    *,
+    file_id: str,
+    page_no: int,
+    filename: str,
+    total_pages: int,
+    existing_invoice_id: Optional[str],
+    actor: Actor,
+) -> str:
+    """One page of a combined file, as its own invoice."""
+    if existing_invoice_id:
+        invoice_id = existing_invoice_id
+    else:
+        existing = (
+            _sb()
+            .table("invoices")
+            .select("id,status")
+            .eq("source_file_id", file_id)
+            .eq("source_page", page_no)
+            .limit(1)
+            .execute()
+        )
+        if existing.data:
+            return "existing"
+
+        created = (
+            _sb()
+            .table("invoices")
+            .insert(
+                {
+                    "source_file_id": file_id,
+                    "source_page": page_no,
+                    "source_filename": filename,
+                    "source_path": f"White Cap/{filename}",
+                    "status": "ingested",
+                }
+            )
+            .execute()
+        )
+        if not created.data:
+            raise RuntimeError(f"insert returned no row for page {page_no}")
+        invoice_id = created.data[0]["id"]
+        audit.log_transition(
+            invoice_id=invoice_id,
+            action="ingested",
+            from_status="none",
+            to_status="ingested",
+            actor=actor,
+            diff={
+                "source_file_id": file_id,
+                "source_page": page_no,
+                "of_pages": total_pages,
+            },
+        )
+
+    path = storage.make_invoice_pdf_path(invoice_id)
+    storage.upload_bytes(storage.INVOICES, path, page_bytes)
+    _sb().table("invoices").update({"pdf_storage_path": path}).eq(
+        "id", invoice_id
+    ).execute()
+
+    # SOP §5: "Skip yard invoices — don't enter them." Checked before the
+    # Claude call when the page has a text layer, because a yard page costs
+    # nothing to recognise and should not cost a model call either. Scanned
+    # pages have no text, so `is_yard_invoice` runs again after extraction on
+    # the job name the model read.
+    text = pdf_split.page_text(page_bytes)
+    if text and is_yard_invoice(text):
         flag_invoice(
             invoice_id,
-            code="stop_and_ask",
+            code="yard",
             detail=(
-                "This is a combined White Cap file covering several jobs. The "
-                "page splitter is a Phase 4 feature; split it by CUSTOMER JOB "
-                "NO. into White Cap/[Job Name]/ for now, per SOP §5."
+                "A White Cap yard invoice (SOP §5). These are never entered "
+                "in BuilderTrend. Void it to clear the queue."
             ),
             actor=actor,
             current_status="ingested",
         )
-        return {
-            "outcome": "flagged",
-            "invoice_id": invoice_id,
-            "detail": "Combined White Cap file, needs splitting.",
-        }
+        return "flagged"
 
-    status = apply_extraction(invoice_id, actor=actor)
-    return {"outcome": status, "invoice_id": invoice_id, "detail": ""}
+    job_hint = pdf_split.customer_job_no(text) if text else None
+    return apply_extraction(invoice_id, actor=actor, project_hint=job_hint)
 
 
 # ─── Manual upload (prompt §7.1, the non-Drive path) ──────────────────

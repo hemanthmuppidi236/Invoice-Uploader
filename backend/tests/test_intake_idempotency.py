@@ -103,11 +103,16 @@ def test_a_failed_download_flags_rather_than_vanishing(db, monkeypatch):
     assert "403" in row["flag_detail"]
 
 
-def test_a_combined_white_cap_file_is_flagged_not_misread(db, monkeypatch):
-    """A 12-page multi-job bundle read as one invoice would produce a
-    confident wrong total. The splitter is Phase 4, so flag instead."""
-    monkeypatch.setattr(intake.drive, "download", lambda _f: b"%PDF-1.4 fake")
+def test_a_combined_white_cap_file_is_split_not_misread(db, monkeypatch):
+    """A 12-page multi-job bundle read as one invoice would produce one
+    confident five-figure total on one wrong job. SOP §5: one page is one
+    invoice. The per-page behaviour is covered in test_white_cap_split.py;
+    this pins that intake reaches the splitter at all."""
+    from tests.helpers import make_pdf
+
+    monkeypatch.setattr(intake.drive, "download", lambda _f: make_pdf(3))
     monkeypatch.setattr(intake.storage, "upload_bytes", lambda *a, **k: "path.pdf")
+    monkeypatch.setattr(intake, "apply_extraction", lambda *a, **k: "suggested")
     db.tables["invoices"] = FakeTable("invoices", [])
 
     outcome = intake._process_file(
@@ -116,10 +121,34 @@ def test_a_combined_white_cap_file_is_flagged_not_misread(db, monkeypatch):
         actor=intake.SYSTEM_ACTOR,
     )
 
-    assert outcome["outcome"] == "flagged"
-    row = db.tables["invoices"].rows[0]
-    assert row["flag_code"] == "stop_and_ask"
-    assert "CUSTOMER JOB NO" in row["flag_detail"]
+    assert outcome["outcome"] == "split"
+    assert outcome["pages"] == 3
+    # One row per page, sharing the file id — the (source_file_id,
+    # source_page) key from migration 001 is what makes re-polling re-find
+    # every page rather than duplicating any of them.
+    rows = db.tables["invoices"].rows
+    assert len(rows) == 3
+    assert {r["source_page"] for r in rows} == {1, 2, 3}
+    assert {r["source_file_id"] for r in rows} == {"drive-wc"}
+
+
+def test_a_single_page_white_cap_file_skips_the_splitter(db, monkeypatch):
+    """A one-page White Cap file is just an invoice. Routing it through the
+    splitter would add a layer to debug through for no gain."""
+    from tests.helpers import make_pdf
+
+    monkeypatch.setattr(intake.drive, "download", lambda _f: make_pdf(1))
+    monkeypatch.setattr(intake.storage, "upload_bytes", lambda *a, **k: "path.pdf")
+    monkeypatch.setattr(intake, "apply_extraction", lambda *a, **k: "suggested")
+    db.tables["invoices"] = FakeTable("invoices", [])
+
+    outcome = intake._process_file(
+        {"id": "drive-wc-1", "name": "one page.pdf"},
+        source_label="White Cap",
+        actor=intake.SYSTEM_ACTOR,
+    )
+    assert outcome["outcome"] == "suggested"
+    assert len(db.tables["invoices"].rows) == 1
 
 
 def test_an_already_split_white_cap_invoice_is_processed_normally(db, monkeypatch):

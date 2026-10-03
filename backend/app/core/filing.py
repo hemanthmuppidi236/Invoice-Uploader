@@ -299,6 +299,17 @@ def file_invoice(
             "This invoice was uploaded by hand, so there is no Drive "
             "original to archive. The filed copy is in place."
         )
+    elif archive and (pending := _unfiled_siblings(invoice)):
+        # A combined White Cap PDF is ONE Drive file behind many invoices
+        # (SOP §5). Moving it out of the intake folder when the first page is
+        # filed would hide a document whose other pages are still being
+        # worked — and the person looking for it has no way to know it went
+        # early. The last page to be filed takes it.
+        result.warnings.append(
+            f"The Drive original covers {pending + 1} invoices and "
+            f"{pending} of them are not filed yet, so it stays in the intake "
+            "folder. It is archived with the last one."
+        )
     elif archive and invoice.get("source_file_id"):
         try:
             archive_folder = _find_archive_folder(invoice)
@@ -319,6 +330,31 @@ def file_invoice(
 
     log.info("filed invoice %s to %s", invoice.get("id"), filed_path)
     return result
+
+
+def _unfiled_siblings(invoice: dict) -> int:
+    """How many other invoices share this Drive file and are not yet filed.
+
+    Zero for an ordinary single-invoice PDF, which is the common case and
+    costs one indexed lookup. Non-zero only for a split combined file.
+    """
+    file_id = invoice.get("source_file_id")
+    if not file_id:
+        return 0
+    rows = (
+        get_service_client()
+        .table("invoices")
+        .select("id,status")
+        .eq("source_file_id", file_id)
+        .neq("id", invoice["id"])
+        .execute()
+        .data
+        or []
+    )
+    # `void` counts as settled: an invoice that will never be entered should
+    # not hold the original in the intake folder forever. SOP §5 yard pages
+    # are voided, and most combined files have at least one.
+    return sum(1 for r in rows if r.get("status") not in ("filed", "void"))
 
 
 def _find_archive_folder(invoice: dict) -> Optional[str]:

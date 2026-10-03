@@ -14,6 +14,7 @@ from decimal import Decimal
 import pytest
 
 from app.core import filing
+from tests.fakes import FakeClient, FakeTable
 
 
 # ─── Naming convention inference (SOP §7) ─────────────────────────────
@@ -154,6 +155,12 @@ def drive(monkeypatch):
     fake = FakeDrive()
     for name in ("find_folder", "list_filenames", "upload_copy", "move"):
         monkeypatch.setattr(filing.drive, name, getattr(fake, name))
+    # Filing asks the database whether this Drive file backs other invoices
+    # that are not filed yet (SOP §5 combined files). Default: it does not.
+    client = FakeClient()
+    client.tables["invoices"] = FakeTable("invoices", [])
+    monkeypatch.setattr(filing, "get_service_client", lambda: client)
+    fake.db = client
     monkeypatch.setattr(
         filing.storage, "download_bytes", lambda bucket, path: b"%PDF-1.4 fake"
     )
@@ -332,3 +339,79 @@ def test_filing_never_deletes():
             text = fh.read()
         assert ".delete(" not in text
         assert "files().delete" not in text
+
+
+# ─── A combined file backs several invoices (SOP §5) ──────────────────
+
+
+def _sibling(drive, invoice_id, status):
+    drive.db.tables["invoices"].rows.append(
+        {"id": invoice_id, "source_file_id": "drive-file-1", "status": status}
+    )
+
+
+def _ready(drive):
+    drive.folders[("bt-root", "A Street Flats")] = "proj-folder"
+    drive.folders[("proj-folder", "CalPortland")] = "vend-folder"
+    drive.folders[("intake", "Uploaded")] = "archive-folder"
+
+
+def test_the_original_stays_put_while_sibling_pages_are_unworked(drive):
+    """A combined White Cap PDF is one Drive file behind twelve invoices.
+    Moving it out of the intake folder when page one is filed hides a
+    document whose other pages are still being worked, and the person looking
+    for it has no way to know it went early."""
+    _ready(drive)
+    _sibling(drive, "inv-2", "assigned")
+    _sibling(drive, "inv-3", "approved")
+
+    result = filing.file_invoice(invoice=_invoice(), project=PROJECT, vendor=VENDOR)
+
+    assert result.filed_path          # the copy still happens
+    assert result.archived is False
+    assert drive.moved == []
+    assert any("2 of them are not filed yet" in w for w in result.warnings)
+
+
+def test_the_last_page_filed_takes_the_original_with_it(drive):
+    _ready(drive)
+    _sibling(drive, "inv-2", "filed")
+    _sibling(drive, "inv-3", "filed")
+
+    result = filing.file_invoice(invoice=_invoice(), project=PROJECT, vendor=VENDOR)
+
+    assert result.archived is True
+    assert drive.moved == [("drive-file-1", "archive-folder")]
+
+
+def test_a_voided_page_does_not_hold_the_original_forever(drive):
+    """SOP §5 yard pages are voided and never entered, and most combined
+    files have at least one. Counting them as pending would leave every
+    combined original in the intake folder permanently."""
+    _ready(drive)
+    _sibling(drive, "inv-2", "filed")
+    _sibling(drive, "inv-yard", "void")
+
+    result = filing.file_invoice(invoice=_invoice(), project=PROJECT, vendor=VENDOR)
+    assert result.archived is True
+
+
+def test_an_ordinary_single_invoice_pdf_is_archived_immediately(drive):
+    _ready(drive)
+    result = filing.file_invoice(invoice=_invoice(), project=PROJECT, vendor=VENDOR)
+    assert result.archived is True
+
+
+def test_a_hand_uploaded_invoice_has_no_original_to_archive(drive):
+    """There is no Drive file behind it. Saying so beats reporting a failed
+    move, which on /uploads would read as something to retry."""
+    _ready(drive)
+    result = filing.file_invoice(
+        invoice=_invoice(source_file_id="upload:abc123", source_path=None),
+        project=PROJECT,
+        vendor=VENDOR,
+    )
+    assert result.filed_path
+    assert result.archived is False
+    assert drive.moved == []
+    assert any("uploaded by hand" in w for w in result.warnings)
