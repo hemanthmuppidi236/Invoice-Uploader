@@ -286,6 +286,20 @@ account that can see the folders; the cron reuses the refresh token.
 
 ### Either way: the folder IDs
 
+Rather than opening three folders and copying from the address bar:
+
+```bash
+backend/.venv/bin/python scripts/find_drive_folders.py
+```
+
+It prints which Google account the token actually belongs to — the consent
+screen is easy to complete as the wrong account, and nothing downstream
+complains, the poll just never finds anything — then looks each folder up by
+name. A folder it cannot find is a folder the app will not be able to read
+either, so a miss here is the answer rather than a nuisance.
+
+Manually, if you prefer:
+
 Get them from the part of each folder's URL after `/folders/`:
 
 ```bash
