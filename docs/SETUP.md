@@ -464,6 +464,7 @@ BuilderTrend upload.
 | `Unsupported provider: provider is not enabled` | Google is not enabled in Supabase → Authentication → Providers. The toggle does not persist until you press Save, and will not save with the client ID or secret blank |
 | `Cannot convert argument to a ByteString ... value of 8232` | A Supabase key was pasted with an invisible character (8232 is U+2028 LINE SEPARATOR). Both apps now strip these, so this only bites a deployment built before that — re-paste the key and redeploy |
 | `redirect_uri_mismatch` from Google | The Web client's redirect URI is not the Supabase `/auth/v1/callback` one |
+| The Chrome session "cannot find the approved invoices" | It was never told the API URL or the agent key — they live only in Render, and the app cannot publish them to the Claude project. Run `scripts/check_agent_access.py` to confirm the app side, then `scripts/make_agent_brief.py` for the text to paste into the project |
 | No Drive yet, but you want to try an invoice | Use **Upload a PDF** on `/invoices` (accounting only). Same pipeline from the PDF onward |
 | Poll finds nothing, no error | Service account mode: the folders were never shared with it. OAuth mode: the account you consented as cannot see them. |
 | Cannot create a service account | Org policy `iam.disableServiceAccountCreation`. Use §4 option B; no admin exception needed. |

@@ -32,3 +32,6 @@ out/
 
 # Minted OAuth tokens. Written by scripts/get_google_refresh_token.py.
 scripts/google-credentials.env
+
+# The Claude project brief. Contains the agent key.
+scripts/claude-project-brief.md

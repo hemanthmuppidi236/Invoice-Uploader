@@ -155,7 +155,34 @@ same reason. The invoice is still loud: it sits in an amber section on
 `/uploads` with the reason and a retry button, and the invoice's own banner
 says which half is outstanding.
 
-## 5. Setting up
+## 5. Telling the Chrome session where the app is
+
+The session knows only what its saved process doc tells it. The app cannot
+publish to the Claude project, cannot register itself, and cannot be
+discovered — so an API URL and an agent key that exist only in Render are
+invisible to it, and "I cannot find the approved invoices" is the correct and
+completely unhelpful result.
+
+Two scripts close that gap:
+
+```bash
+# Does the app side work at all? Separates "the session was never told"
+# from "the key is wrong" from "there is nothing approved" — three causes
+# that look identical from inside a session.
+python scripts/check_agent_access.py https://your-service.onrender.com
+
+# The text to paste into the Claude project: connection block with the real
+# URL and key, followed by the whole of docs/AGENT_API.md.
+python scripts/make_agent_brief.py https://your-service.onrender.com
+```
+
+The brief is gitignored because it carries the agent key. Anyone with access
+to that Claude project can read it — which is bounded by design: the key
+reaches four endpoints (read the queue, read a PDF URL, report a save, flag)
+and can never approve anything. The guardrails live in the API, not in the
+doc, precisely because the doc is editable by anyone with project access.
+
+## 6. Setting up
 
 ### Drive
 
@@ -186,7 +213,7 @@ the Render cron jobs. Compared with `secrets.compare_digest`, and an unset key
 **denies** rather than allowing — a deploy that forgets it locks the agent out
 instead of opening the door.
 
-## 6. Running the gate
+## 7. Running the gate
 
 1. Confirm `GET /health` shows `"filing": true` and `"agent_auth": true`.
 2. Get an invoice all the way to `approved` (Phase 2).
@@ -208,7 +235,7 @@ Worth doing deliberately once:
   filing stops and asks, and `/uploads` shows the retry. Rename it back and
   press retry.
 
-## 7. Decisions taken in Phase 3
+## 8. Decisions taken in Phase 3
 
 - **The backend files, not Chrome** (§14's open question). Deterministic
   parsing beats browsing, and it removes the SOP §9 shell-escaping failure
@@ -236,7 +263,7 @@ Worth doing deliberately once:
   several invoice rows, so the second page's filing asks to archive a file the
   first page already archived.
 
-## 8. Known gaps to pick up later
+## 9. Known gaps to pick up later
 
 - **The queue generates one signed URL per invoice, synchronously.** A daily
   batch is fine; a first run over a 100-invoice backlog makes 100 Storage
