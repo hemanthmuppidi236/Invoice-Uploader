@@ -136,7 +136,10 @@ Command:   curl -fsS -X POST "$API_URL/jobs/poll-drive" \
 ```
 
 The endpoint is never open — it makes the app download arbitrary Drive files
-on demand, so it requires the shared key. `limit` caps how many new invoices
+on demand. It takes either the shared key (cron) or a signed-in admin or
+accountant, which is what the **Run intake now** button on `/invoices` uses:
+§3 gives the accountant role "run intake", and the browser cannot be given
+the shared key. `limit` caps how many new invoices
 one run ingests (default 50, max 200), because each one costs a Claude call
 and a first run over a full backlog should be bounded.
 

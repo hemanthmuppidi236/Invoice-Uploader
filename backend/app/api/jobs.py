@@ -17,7 +17,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ..core import email_jobs, intake
-from ..core.auth import Actor, require_job_key
+from ..core.auth import Actor, require_agent_or_role, require_job_key
 from ..core.config import settings
 from ..schemas.invoices import EmailJobResultOut, PollResultOut
 
@@ -37,7 +37,12 @@ def poll_drive(
             "unbounded."
         ),
     ),
-    actor: Actor = Depends(require_job_key()),
+    # Two callers, two credentials. Render cron sends the shared key; the
+    # "Run intake now" button on /invoices sends a user's bearer token, and
+    # §3 gives the accountant role "run intake" explicitly. Requiring the
+    # agent key alone made that button 401 on every click — it looked like a
+    # broken integration rather than a missing header.
+    actor: Actor = Depends(require_agent_or_role("admin", "accountant")),
 ):
     """Scan the Drive intake folders and process anything new (§7.1).
 
@@ -45,6 +50,10 @@ def poll_drive(
     the same folder without creating duplicates. Never moves or deletes a
     Drive original — that happens after a verified BuilderTrend save, in
     Phase 3.
+
+    Who the actor is still matters after the auth check: every invoice this
+    creates is stamped in audit_log with whoever ran it, so a hand-triggered
+    run is distinguishable from the cron.
     """
     if settings.jobs_paused:
         # 200 with the reason, not an error: a paused job is a deliberate
