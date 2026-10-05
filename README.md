@@ -98,7 +98,8 @@ code gets chosen are in **[docs/PHASE_1.md](docs/PHASE_1.md)**. The workflow,
 Gmail setup, and the cron schedules are in
 **[docs/PHASE_2.md](docs/PHASE_2.md)**. The upload and filing half is in
 **[docs/PHASE_3.md](docs/PHASE_3.md)**, and the contract the Chrome session
-itself works from is **[docs/AGENT_API.md](docs/AGENT_API.md)**. The White
+itself works from is **[docs/CHROME_SESSION.md](docs/CHROME_SESSION.md)**,
+which merges that contract with the BuilderTrend SOP into one playbook. The White
 Cap splitter, duplicate scoring, and metrics are in
 **[docs/PHASE_4.md](docs/PHASE_4.md)**.
 

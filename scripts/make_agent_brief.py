@@ -82,11 +82,14 @@ def main() -> None:
             "environment. It must match the value set on Render."
         )
 
-    contract = (REPO / "docs" / "AGENT_API.md").read_text()
-    # The brief carries its own connection section, so drop the placeholder
-    # auth section from the contract rather than contradicting it.
-    marker = "\n## 1. Read the queue"
-    body = contract[contract.index(marker):] if marker in contract else contract
+    # The playbook, not the raw API contract: it merges the app's half with
+    # the BuilderTrend SOP, so a session reads one document rather than two
+    # that can drift apart.
+    playbook = (REPO / "docs" / "CHROME_SESSION.md").read_text()
+    # Its §1 tells a human how to generate this file, which is noise once the
+    # file exists and the values are already at the top.
+    marker = "\n## 2. The order of operations"
+    body = playbook[playbook.index(marker):] if marker in playbook else playbook
 
     out = HERE / "claude-project-brief.md"
     out.write_text(HEADER.format(base=base, key=key) + body)
@@ -97,8 +100,11 @@ def main() -> None:
     print(f"  Agent key:    {key[:6]}…{key[-4:]} ({len(key)} chars)")
     print(
         "\nPaste the whole file into the 'Invoice Upload on Builder Trend'\n"
-        "Claude project, alongside the BuilderTrend element ids and click\n"
-        "snippets that already live there.\n"
+        "Claude project. It replaces any older copy of the API contract.\n"
+        "\nStill add, separately: the element ids and JavaScript click\n"
+        "snippets from claude/buildertrend-invoice-upload-process.md. The\n"
+        "quirks and the order of operations are covered here; the named\n"
+        "handles are not.\n"
         "\nIt contains the agent key, so it is gitignored. Anyone with access\n"
         "to that project can read the key; it is scoped to four endpoints\n"
         "(read the queue, read a PDF URL, report a save, flag) and can never\n"
